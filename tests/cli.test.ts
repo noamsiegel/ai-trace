@@ -13,8 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { resolve } from 'node:path';
-const CLI = resolve(import.meta.dir, '..', 'cli.ts');
+const CLI = `${process.env.HOME}/.pai/skills/provenance/cli.ts`;
 
 interface Result {
   status: number | null;
@@ -101,7 +100,7 @@ describe('collect end-to-end with synthetic session', () => {
   });
 
   test('sessions-since detects the fixture session', () => {
-    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--root', repo], {
+    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--scope', 'time', '--root', repo], {
       encoding: 'utf8',
       env: { ...process.env, HOME: fakeHome },
     });
@@ -117,13 +116,23 @@ describe('collect end-to-end with synthetic session', () => {
     // the filter behavior via direct CLI subprocess.
     // For now we rely on sessions-since prompt count: 2 valid (refactor, my email…),
     // the slash command should NOT be counted.
-    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--root', repo], {
+    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--scope', 'time', '--root', repo], {
       encoding: 'utf8',
       env: { ...process.env, HOME: fakeHome },
     });
     const m = r.stdout.match(/prompts=(\d+)/);
     expect(m).not.toBeNull();
     expect(Number.parseInt(m![1]!, 10)).toBe(2); // refactor + email-line; slash filtered.
+  });
+  test('default scope (both) requires file-overlap; session with no file_path → no match', () => {
+    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--root', repo], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: fakeHome },
+    });
+    expect(r.status).toBe(0);
+    // The fixture session has prompts but no `file_path` references, so under
+    // 'both' scope (time AND file overlap) there's no match.
+    expect(r.stdout).toContain('No overlapping sessions');
   });
 });
 

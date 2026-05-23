@@ -44,6 +44,7 @@ interface Args {
   pr?: string;
   base?: string;
   graceMin: number;
+  scope: 'time' | 'file' | 'both';
   includeCode: boolean;
   dryRun: boolean;
   noAttach: boolean;
@@ -91,6 +92,7 @@ const DEFAULT_SCRUBBERS: ScrubRule[] = [
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     graceMin: 30,
+    scope: 'both',
     includeCode: false,
     dryRun: false,
     noAttach: false,
@@ -110,6 +112,13 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--grace-min':
         args.graceMin = Number.parseInt(argv[++i]!, 10);
+        break;
+      case '--scope':
+        const v = argv[++i];
+        if (v !== 'time' && v !== 'file' && v !== 'both') {
+          die(`--scope must be one of: time, file, both (got: ${v})`);
+        }
+        args.scope = v;
         break;
       case '--include-code':
         args.includeCode = true;
@@ -165,6 +174,10 @@ flags:
   --pr <num>          Target PR (default: detect from current branch via gh).
   --base <ref>        Base ref for scoping (default: PR base branch).
   --grace-min N       Time-overlap grace in minutes (default: 30).
+  --scope <mode>      Session-scoping: time | file | both (default: both).
+                      'both' = intersection of time AND file overlap (most precise).
+                      'file' = only sessions that touched files in the PR diff.
+                      'time' = only time-overlap (broader, the v0.1.0 default).
   --include-code      Include code blocks (default: omit).
   --dry-run           Print what would happen; do not create gist.
   --no-attach         Create gist but don't edit the PR.
@@ -248,11 +261,19 @@ function getCommitTimestampsForRange(base: string, repoRoot: string): { min: num
   return { min: Math.min(...ts), max: Math.max(...ts), count: ts.length };
 }
 
+function getDiffFilesForRange(base: string, repoRoot: string): Set<string> {
+  // Files changed by HEAD vs base.
+  const r = git(['diff', '--name-only', `${base}..HEAD`], repoRoot);
+  if (r.status !== 0) return new Set();
+  return new Set(r.stdout.split('\n').filter(Boolean));
+}
+
 interface SessionMeta {
   path: string;
   firstTs: number;
   lastTs: number;
   promptCount: number;
+  filesTouched: Set<string>;
 }
 
 /**
@@ -332,10 +353,16 @@ function inspectSession(path: string): SessionMeta | null {
   let lastTs = 0;
   let promptCount = 0;
   let rowCount = 0;
+  const filesTouched = new Set<string>();
   for (const line of content.split('\n')) {
     if (++rowCount > MAX_JSONL_ROWS) break;
     if (!line.trim()) continue;
-    let row: { type?: string; timestamp?: string; message?: { content?: unknown } };
+    let row: {
+      type?: string;
+      timestamp?: string;
+      message?: { content?: unknown };
+      toolUseResult?: unknown;
+    };
     try {
       row = JSON.parse(line);
     } catch {
@@ -349,8 +376,31 @@ function inspectSession(path: string): SessionMeta | null {
       }
     }
     if (row.type === 'user' && isRealPrompt(row.message?.content)) promptCount++;
+    // Extract file paths from tool-use blocks (Edit, Write, Read, etc.).
+    extractFilePaths(row, filesTouched);
   }
-  return { path, firstTs, lastTs, promptCount };
+  return { path, firstTs, lastTs, promptCount, filesTouched };
+}
+
+function extractFilePaths(row: unknown, out: Set<string>): void {
+  if (!row || typeof row !== 'object') return;
+  // Walk the row recursively; collect any value at key "file_path".
+  const stack: unknown[] = [row];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (!v || typeof v !== 'object') continue;
+    if (Array.isArray(v)) {
+      for (const item of v) stack.push(item);
+      continue;
+    }
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (k === 'file_path' && typeof val === 'string' && val.length > 0) {
+        out.add(val);
+      } else if (val && typeof val === 'object') {
+        stack.push(val);
+      }
+    }
+  }
 }
 
 function isRealPrompt(content: unknown): boolean {
@@ -369,6 +419,33 @@ function isRealPrompt(content: unknown): boolean {
 function overlapsRange(s: SessionMeta, range: { min: number; max: number }, graceMin: number): boolean {
   const grace = graceMin * 60 * 1000;
   return s.lastTs >= range.min - grace && s.firstTs <= range.max + grace;
+}
+
+function intersectsDiffFiles(s: SessionMeta, diffFiles: Set<string>): boolean {
+  if (diffFiles.size === 0) return false;
+  // Match by realpath suffix: session paths are usually absolute but diff files
+  // are relative. Treat as overlap if any session-touched path ends with any
+  // diff-file path.
+  for (const f of diffFiles) {
+    for (const touched of s.filesTouched) {
+      if (touched.endsWith(`/${f}`) || touched === f) return true;
+    }
+  }
+  return false;
+}
+
+function filterScope(
+  s: SessionMeta,
+  range: { min: number; max: number },
+  diffFiles: Set<string>,
+  args: { scope: 'time' | 'file' | 'both'; graceMin: number },
+): boolean {
+  const timeMatch = overlapsRange(s, range, args.graceMin);
+  switch (args.scope) {
+    case 'time': return timeMatch;
+    case 'file': return intersectsDiffFiles(s, diffFiles);
+    case 'both': return timeMatch && intersectsDiffFiles(s, diffFiles);
+  }
 }
 
 function applyScrubbers(s: string, rules: ScrubRule[]): string {
@@ -474,8 +551,44 @@ function collectMarkdown(repoRoot: string, prNum: number, baseRef: string, sessi
 }
 
 function loadScrubbers(): ScrubRule[] {
-  // For MVP: just defaults. Phase 3 will read CONFIG_FILE for custom rules.
-  return DEFAULT_SCRUBBERS;
+  // Default scrubbers always apply. Merge user-supplied rules from
+  // ~/.config/provenance/config.json (JSON, not YAML, to avoid a YAML dep).
+  //
+  // Expected shape:
+  // {
+  //   "scrubbers": [
+  //     { "id": "my-pattern", "pattern": "regex", "replacement": "[REDACTED]",
+  //       "flags": "gi" }
+  //   ]
+  // }
+  const configJson = join(homedir(), '.config', 'provenance', 'config.json');
+  if (!existsSync(configJson)) return DEFAULT_SCRUBBERS;
+
+  const userRules: ScrubRule[] = [];
+  try {
+    const raw = readFileSync(configJson, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      scrubbers?: Array<{ id?: string; pattern?: string; replacement?: string; flags?: string }>;
+    };
+    if (Array.isArray(parsed.scrubbers)) {
+      for (const r of parsed.scrubbers) {
+        if (!r.id || !r.pattern || r.replacement === undefined) continue;
+        try {
+          userRules.push({
+            id: r.id,
+            pattern: new RegExp(r.pattern, r.flags ?? 'g'),
+            replacement: r.replacement,
+          });
+        } catch (e) {
+          console.error(`provenance: bad scrubber regex '${r.id}': ${(e as Error).message}`);
+        }
+      }
+    }
+  } catch (e) {
+    console.error(`provenance: could not load ${configJson}: ${(e as Error).message}`);
+  }
+
+  return [...DEFAULT_SCRUBBERS, ...userRules];
 }
 
 function gitleaksCheck(content: string): { ok: boolean; report: string } {
@@ -492,7 +605,8 @@ function cmdCollect(args: Args) {
   const pr = detectPr(args);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
   const all = loadSessionsForRepo(repoRoot);
-  const overlapping = all.filter((s) => overlapsRange(s, range, args.graceMin));
+  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
+  const overlapping = all.filter((s) => filterScope(s, range, diffFiles, args));
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
     includeCode: args.includeCode,
     scrubbers: loadScrubbers(),
@@ -506,7 +620,8 @@ function cmdSessionsSince(args: Args) {
   const repoRoot = detectRepoRoot(args.root);
   const range = getCommitTimestampsForRange(ref, repoRoot);
   const all = loadSessionsForRepo(repoRoot);
-  const overlapping = all.filter((s) => overlapsRange(s, range, args.graceMin));
+  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(ref, repoRoot) : new Set<string>();
+  const overlapping = all.filter((s) => filterScope(s, range, diffFiles, args));
   if (overlapping.length === 0) {
     console.log(`No overlapping sessions for commits in ${ref}..HEAD (${range.count} commits).`);
     return;
@@ -541,7 +656,8 @@ function cmdGistCreate(args: Args) {
   }
 
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
-  const overlapping = loadSessionsForRepo(repoRoot).filter((s) => overlapsRange(s, range, args.graceMin));
+  const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
+  const overlapping = loadSessionsForRepo(repoRoot).filter((s) => filterScope(s, range, diffFiles, args));
   if (overlapping.length === 0) {
     die(`no sessions overlap commits in origin/${pr.baseRef}..HEAD (PR #${pr.number})`);
   }
@@ -571,15 +687,54 @@ function cmdGistCreate(args: Args) {
     return;
   }
 
-  const visibilityFlag = args.public_ ? '--public' : '--secret';
+  // Find an existing gist URL in the PR body so we can update IN PLACE
+  // instead of creating a new gist on every re-attach.
+  const existingGistId = findExistingGistId(pr.number);
+
   const tmp = join(tmpdir(), `provenance-pr-${pr.number}.md`);
   writeFileSync(tmp, md);
-  const ghOut = run('gh', ['gist', 'create', visibilityFlag, '--filename', `pr-${pr.number}.md`, tmp]);
-  if (ghOut.status !== 0) die(`gh gist create failed: ${ghOut.stderr.trim()}`);
-  const url = ghOut.stdout.trim().split('\n').pop()!;
+
+  let url: string;
+  if (existingGistId) {
+    const editOut = run('gh', ['gist', 'edit', existingGistId, '--filename', `pr-${pr.number}.md`, tmp]);
+    if (editOut.status !== 0) {
+      console.error(`provenance: could not update existing gist ${existingGistId} (${editOut.stderr.trim()}); creating a new one.`);
+      const created = createGist(args.public_, pr.number, tmp);
+      url = created;
+    } else {
+      // gh gist edit doesn't print the URL; reconstruct.
+      url = `https://gist.github.com/${existingGistId}`;
+      console.error(`provenance: updated existing gist ${existingGistId} in place`);
+    }
+  } else {
+    url = createGist(args.public_, pr.number, tmp);
+  }
+
   console.log(url);
   if (args.noAttach) return;
   attachToPr(pr.number, url);
+}
+
+function createGist(public_: boolean, prNum: number, srcFile: string): string {
+  const visibilityFlag = public_ ? '--public' : '--secret';
+  const ghOut = run('gh', ['gist', 'create', visibilityFlag, '--filename', `pr-${prNum}.md`, srcFile]);
+  if (ghOut.status !== 0) die(`gh gist create failed: ${ghOut.stderr.trim()}`);
+  return ghOut.stdout.trim().split('\n').pop()!;
+}
+
+function findExistingGistId(prNum: number): string | null {
+  const view = run('gh', ['pr', 'view', String(prNum), '--json', 'body']);
+  if (view.status !== 0) return null;
+  let body: string;
+  try {
+    body = (JSON.parse(view.stdout).body as string) ?? '';
+  } catch {
+    return null;
+  }
+  // Match: "🤖 AI Provenance: https://gist.github.com/<owner>/<gist-id>"
+  // or:    "🤖 AI Provenance: https://gist.github.com/<gist-id>"
+  const m = body.match(/🤖 AI Provenance:\s*https:\/\/gist\.github\.com\/(?:[^/\s]+\/)?([a-f0-9]+)/);
+  return m ? m[1]! : null;
 }
 
 function attachToPr(prNum: number, gistUrl: string) {

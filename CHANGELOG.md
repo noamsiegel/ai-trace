@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0] — file-overlap scoping + custom scrubbers + gist-in-place re-attach
+
+### Added
+- **File-overlap session scoping.** New `--scope <time|file|both>` flag (default `both`). Intersects time-overlap with files-touched-by-the-PR-diff, addressing the pentester's H2 finding (forgeable-mtime session attachment). Falls back to time-only with `--scope time`.
+- **Custom scrubber rules** via `~/.config/provenance/config.json`. Format:
+  ```json
+  {
+    "scrubbers": [
+      { "id": "my-token", "pattern": "MYORG-[A-Z0-9]{16}", "replacement": "[REDACTED-ORG-TOKEN]", "flags": "g" }
+    ]
+  }
+  ```
+  Append to the 15 defaults.
+- **Gist-in-place re-attach.** When the PR body already contains a `🤖 AI Provenance:` URL, `pr-attach` updates that gist via `gh gist edit` instead of creating a new one. No more orphaned gists on force-push re-attach.
+
+### Tests
+- 9 tests pass (1 added: default-scope-requires-file-overlap).
+
 ## [0.1.0] — initial public release
 
 ### Added
