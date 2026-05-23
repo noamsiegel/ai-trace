@@ -45,6 +45,8 @@ interface Args {
   base?: string;
   graceMin: number;
   scope: 'time' | 'file' | 'both';
+  session?: string;
+  lastPrompts?: number;
   includeCode: boolean;
   dryRun: boolean;
   noAttach: boolean;
@@ -141,6 +143,12 @@ function parseArgs(argv: string[]): Args {
       case '--public-ok':
         args.publicOk = true;
         break;
+      case '--session':
+        args.session = argv[++i];
+        break;
+      case '--last-prompts':
+        args.lastPrompts = Number.parseInt(argv[++i]!, 10);
+        break;
       case '--help':
       case '-h':
         printHelp();
@@ -169,6 +177,9 @@ subcommands:
                           Create gist (secret by default); print URL.
   pr-attach [--pr N]      gist-create + edit PR description.
   scrub-rules             Show active scrubbing rules.
+  handoff [--session ID] [--last-prompts N]
+                          Compact brief of the latest (or named) session for
+                          a subagent's system prompt.
 
 flags:
   --pr <num>          Target PR (default: detect from current branch via gh).
@@ -202,9 +213,10 @@ function git(args: string[], cwd?: string): { status: number; stdout: string; st
   return run('git', cwd ? ['-C', cwd, ...args] : args);
 }
 
-// Encode a repo path the way Claude Code does: `/Users/x/y` → `-Users-x-y`.
+// Encode a repo path the way Claude Code does: replace BOTH `/` and `.` with `-`.
+// e.g. /Users/noam.siegel/Documents/GitHub/foo → -Users-noam-siegel-Documents-GitHub-foo
 function encodeCwd(p: string): string {
-  return p.replace(/\//g, '-');
+  return p.replaceAll('/', '-').replaceAll('.', '-');
 }
 
 function detectRepoRoot(override?: string): string {
@@ -757,6 +769,125 @@ function cmdPrAttach(args: Args) {
   cmdGistCreate(args);
 }
 
+function cmdHandoff(args: Args) {
+  // Produce a compact brief of the LATEST session in the current repo, suitable
+  // for inclusion in a subagent's system prompt. Different shape from `collect`:
+  //
+  //   collect — lossless audit log; for human review of an entire PR
+  //   handoff — decision-distilled, token-budget aware; for handing off to a
+  //             subagent so it doesn't re-discover everything
+  //
+  // Format:
+  //   - Header: repo, branch, time window, prompt count
+  //   - Last N user prompts (default 10)
+  //   - Distinct files touched (sorted)
+  //   - Tool usage counts
+  //   - No raw assistant responses (too long), no slash commands
+
+  const lastN = args.lastPrompts ?? 10;
+  const repoRoot = detectRepoRoot(args.root);
+  const sessions = loadSessionsForRepo(repoRoot);
+
+  let session: SessionMeta | undefined;
+  if (args.session) {
+    session = sessions.find((s) => s.path.endsWith(`${args.session}.jsonl`));
+    if (!session) die(`session not found: ${args.session}`);
+  } else {
+    // Pick the session with the most recent `lastTs`.
+    session = sessions.sort((a, b) => b.lastTs - a.lastTs)[0];
+    if (!session) die('no Claude Code sessions found for this repo');
+  }
+
+  const branch = git(['symbolic-ref', '--short', 'HEAD'], repoRoot).stdout.trim() || '(detached)';
+  const repoName = repoRoot.split('/').pop()!;
+  const scrubbers = loadScrubbers();
+
+  const lines: string[] = [];
+  lines.push(`# Handoff brief — ${repoName} (${branch})`);
+  lines.push('');
+  lines.push(`Session: \`${session.path.split('/').pop()}\``);
+  lines.push(`Time window: ${new Date(session.firstTs).toISOString()} → ${new Date(session.lastTs).toISOString()}`);
+  lines.push(`Prompts: ${session.promptCount}`);
+  lines.push(`Files touched: ${session.filesTouched.size}`);
+  lines.push('');
+
+  // Collect prompts + tool uses from the session.
+  const content = safeReadJsonl(session.path);
+  if (content === null) die(`could not safely read session file: ${session.path}`);
+
+  const prompts: { ts: number; text: string }[] = [];
+  const toolUseCounts: Record<string, number> = {};
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    let row: { type?: string; timestamp?: string; message?: { content?: unknown } };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row.type === 'user' && isRealPrompt(row.message?.content)) {
+      const ts = row.timestamp ? Date.parse(row.timestamp) : 0;
+      const text = extractTextFromContent(row.message?.content).trim();
+      prompts.push({ ts, text });
+    }
+    if (row.type === 'assistant' && Array.isArray(row.message?.content)) {
+      for (const block of row.message.content as unknown[]) {
+        if (block && typeof block === 'object') {
+          const b = block as { type?: string; name?: string };
+          if (b.type === 'tool_use' && b.name) {
+            toolUseCounts[b.name] = (toolUseCounts[b.name] ?? 0) + 1;
+          }
+        }
+      }
+    }
+  }
+
+  // Take the last N prompts, scrub them, and render.
+  const recent = prompts.slice(-lastN);
+  lines.push(`## Recent prompts (last ${recent.length})`);
+  lines.push('');
+  for (let i = 0; i < recent.length; i++) {
+    const p = recent[i]!;
+    const ts = p.ts ? new Date(p.ts).toISOString().slice(11, 19) : '';
+    let text = applyScrubbers(p.text, scrubbers);
+    text = neutralizeUntrustedText(text);
+    // Keep prompts terse: collapse internal newlines.
+    text = text.replaceAll(/\s+/g, ' ').slice(0, 300);
+    lines.push(`${i + 1}. **${ts}** — ${text}`);
+  }
+  lines.push('');
+
+  // Files touched.
+  if (session.filesTouched.size > 0) {
+    const files = [...session.filesTouched].sort();
+    lines.push(`## Files touched in this session`);
+    lines.push('');
+    const truncated = files.length > 30 ? files.slice(0, 30) : files;
+    for (const f of truncated) {
+      lines.push(`- \`${applyScrubbers(f, scrubbers)}\``);
+    }
+    if (files.length > 30) {
+      lines.push(`- … and ${files.length - 30} more`);
+    }
+    lines.push('');
+  }
+
+  // Tool usage.
+  const tools = Object.entries(toolUseCounts).sort((a, b) => b[1] - a[1]);
+  if (tools.length > 0) {
+    lines.push(`## Tool usage`);
+    lines.push('');
+    lines.push('| Tool | Count |');
+    lines.push('|---|---|');
+    for (const [name, count] of tools) {
+      lines.push(`| ${name} | ${count} |`);
+    }
+    lines.push('');
+  }
+
+  process.stdout.write(lines.join('\n'));
+}
+
 function cmdScrubRules() {
   const rules = loadScrubbers();
   for (const r of rules) {
@@ -784,6 +915,9 @@ function main() {
       break;
     case 'pr-attach':
       cmdPrAttach(args);
+      break;
+    case 'handoff':
+      cmdHandoff(args);
       break;
     case 'scrub-rules':
       cmdScrubRules();

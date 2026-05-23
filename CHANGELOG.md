@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0] — handoff subcommand + encodeCwd bug fix
+
+### Added
+- **`provenance handoff [--session ID] [--last-prompts N]`** — compact brief of the latest (or named) Claude Code session in the current repo, suitable for inclusion in a subagent's system prompt. Different output shape from `collect` (lossless audit log): decision-distilled, token-budget aware. Includes last N user prompts, files touched, tool usage table.
+
+### Fixed
+- **`encodeCwd` bug**: Claude Code encodes BOTH `/` and `.` as `-` (so `/Users/x.y/foo` → `-Users-x-y-foo`). The previous version only replaced `/`, causing `collect` / `sessions-since` / `handoff` to find zero sessions for any repo whose path contained a `.`.
+
 ## [0.2.0] — file-overlap scoping + custom scrubbers + gist-in-place re-attach
 
 ### Added
