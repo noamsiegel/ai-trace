@@ -19,6 +19,9 @@ writes. See `README.md` for user-facing behavior.
   safe-read checks, or PR marker idempotency to make a test pass.
 - Never commit, tag, push, publish releases, bump the Homebrew tap, or sync the
   PAI skill mirror unless the user explicitly asks for that release step.
+- Dogfood `ai-trace`: AI-authored PRs must run `ai-trace pr-attach` and carry
+  exactly one `🤖 ai-trace:` marker; direct emergency pushes without a PR must
+  run `ai-trace gist-create` or `ai-trace collect` for local audit evidence.
 - Do not add abstract adapter interfaces unless there are at least two real
   implementations or a concrete testability/locality gain that passes the
   deletion test.
