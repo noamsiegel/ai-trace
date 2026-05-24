@@ -1,4 +1,4 @@
-# ai-trace Roadmap
+# agents-trace Roadmap
 
 > Target architecture and quarterly milestones, derived from the
 > `improve-codebase-architecture` audit on 2026-05-23.
@@ -43,7 +43,7 @@ function buildPostingPlan({ visibility, flags, gitleaksResult, action }): Postin
 
 ### Adapter layer (`src/adapters/`, concrete, unmocked)
 
-- `GhClient` — `readPrContext` / `findAttachedAiTraceGist` / `upsertAiTraceGist` / `writeAiTraceLink`
+- `GhClient` — `readPrContext` / `findAttachedAgentsTraceGist` / `upsertAgentsTraceGist` / `writeAgentsTraceLink`
 - `Fs` — `safeReadJsonl` (lstat+fstat, C3 isolated here)
 - `Gitleaks` — `runGitleaks(text)` → `Finding[]`
 - `Git` — `diffFilesForRange`
@@ -118,6 +118,6 @@ function buildPostingPlan({ visibility, flags, gitleaksResult, action }): Postin
 
 ## Open questions
 
-- **Single-file vs `src/` directory**: v0.4.0 introduces `src/core/`. The bin entry stays `cli.ts` for brew compatibility. Decide if the synced copy at `~/Documents/GitHub/ai-trace/cli.ts` becomes a directory or a bundled single file.
+- **Single-file vs `src/` directory**: v0.4.0 introduces `src/core/`. The bin entry stays `cli.ts` for brew compatibility. Decide if the synced copy at `~/Documents/GitHub/agents-trace/cli.ts` becomes a directory or a bundled single file.
 - **`gh` vs Octokit**: stays `gh` (no auth complexity, brew install model). Reconsider only if rate limits or pagination force the issue.
 - **Homebrew-core graduation**: candidate after v0.5.0.

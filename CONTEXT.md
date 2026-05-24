@@ -1,6 +1,6 @@
-# ai-trace CONTEXT
+# agents-trace CONTEXT
 
-Architecture context for agents (human and AI) working on ai-trace itself.
+Architecture context for agents (human and AI) working on agents-trace itself.
 For user documentation see `README.md` and `docs/*`.
 
 ## Load-bearing invariants
@@ -33,12 +33,12 @@ These do not change without a major version bump.
    `src/core/session.ts` (`encodeCwd`, `loadRepoSessions`,
    `inspectCodexSession`, `selectSessionsForRange`) and `src/core/scope.ts`.
 6. **PR marker writes are idempotent**: re-attach must update the existing
-   `🤖 ai-trace:` gist/line instead of appending duplicates. See
-   `src/adapters/gh-client.ts` (`MARKER_PATTERN`, `findAttachedAiTraceGist`,
-   `writeAiTraceLink`).
+   `🤖 agents-trace:` gist/line instead of appending duplicates. See
+   `src/adapters/gh-client.ts` (`MARKER_PATTERN`, `findAttachedAgentsTraceGist`,
+   `writeAgentsTraceLink`).
 7. **The binary is the public API**: `src/core/*` and `src/adapters/*` are
    internal implementation boundaries for tests and maintainability. External
-   users depend on the `ai-trace` CLI, flags, config shape, PR marker, and gist
+   users depend on the `agents-trace` CLI, flags, config shape, PR marker, and gist
    output semantics.
 
 ## Module map
@@ -101,14 +101,14 @@ call `gh`, `gitleaks`, `git`, or mutate PR/gist state.
   runner per adapter would be pass-through unless command behavior diverges.
 - **Renderer/viewer layer**: markdown gist output is the product surface today.
   HTML transcript rendering would be a new product, not a refactor seam.
-- **Cryptographic attestation backend**: ai-trace is not SLSA/in-toto/Sigstore.
+- **Cryptographic attestation backend**: agents-trace is not SLSA/in-toto/Sigstore.
   Add signing only if the product contract changes from reviewer evidence to
   verifiable audit artifact.
 
 ## Public CLI stability
 
-The stable contract is the `ai-trace` binary: subcommands, documented flags,
-JSON config at `~/.config/ai-trace/config.json`, secret-gist PR marker, public
+The stable contract is the `agents-trace` binary: subcommands, documented flags,
+JSON config at `~/.config/agents-trace/config.json`, secret-gist PR marker, public
 PR refusal semantics, and scrub/gitleaks gates. Internal TypeScript exports may
 change to keep those behaviors correct and testable.
 

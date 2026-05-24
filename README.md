@@ -1,13 +1,13 @@
-# ai-trace
+# agents-trace
 
 > Capture Claude Code and Codex CLI session transcripts as scrubbed secret gists linked from GitHub PRs.
 
-`ai-trace` reads local AI coding-session JSONL from Claude Code
+`agents-trace` reads local AI coding-session JSONL from Claude Code
 (`~/.claude/projects/<encoded-cwd>/*.jsonl`) and Codex CLI
 (`~/.codex/sessions/**/*.jsonl`), scrubs it, and attaches cleaned markdown as a
 **secret GitHub gist** linked from your PR description.
 
-Reviewers see one line in the PR body: `🤖 ai-trace: <gist-url>`. The gist
+Reviewers see one line in the PR body: `🤖 agents-trace: <gist-url>`. The gist
 contains prompts that produced code, so auditors can trace intent without
 polluting commit history.
 
@@ -15,17 +15,17 @@ polluting commit history.
 
 | Tool | What it captures | Where it stores | When it runs |
 |---|---|---|---|
-| **ai-trace** | Claude Code + Codex CLI local JSONL sessions; prompts/code intent filtered by PR time/file overlap; scrubbed and gitleaks-gated | Secret GitHub gist linked from PR body as `🤖 ai-trace:` | On-demand or after PR creation/Graphite submit |
+| **agents-trace** | Claude Code + Codex CLI local JSONL sessions; prompts/code intent filtered by PR time/file overlap; scrubbed and gitleaks-gated | Secret GitHub gist linked from PR body as `🤖 agents-trace:` | On-demand or after PR creation/Graphite submit |
 | Goose | Goose agent sessions; documented JSON/Markdown exports | Exported local files/artifacts from Goose session export | On-demand session export |
 | Aider | Chat history and optional LLM history for Aider pair-programming sessions | Local history files such as `.aider.chat.history.md` / LLM history | During Aider use; restored/exported on demand |
-| Codex CLI | Codex session JSONL used for resume | Local `~/.codex/sessions/**/*.jsonl` | During Codex CLI use; consumed by ai-trace on demand |
+| Codex CLI | Codex session JSONL used for resume | Local `~/.codex/sessions/**/*.jsonl` | During Codex CLI use; consumed by agents-trace on demand |
 | codex-transcript-viewer | Codex JSONL session logs rendered for reading | Single-file HTML transcript artifact | On-demand after Codex sessions exist |
 | Cline | Cline agent sessions/checkpoints and headless JSON output; plugin hooks can log/audit events | Cline workspace/session surfaces or plugin-defined sinks | Runtime inside Cline/IDE/CLI |
 | OpenInference | AI observability spans: LLM, agent, tool, retriever, chain events via OpenTelemetry conventions | OTLP-compatible observability backends/traces | Runtime instrumentation |
 | GitHub artifact attestations | Build artifact subjects, digests, predicates, SLSA/in-toto provenance | GitHub attestation store; verifiable with `gh attestation verify` | CI/build workflows |
 | Sigstore / in-toto | Signed supply-chain metadata, artifact signatures, layouts/link metadata | Transparency logs / attestations / OCI or blob signatures | Build/release/signing workflows |
 
-`ai-trace` is narrower: it is not an agent runtime, trace backend,
+`agents-trace` is narrower: it is not an agent runtime, trace backend,
 transcript UI, or build attestation system. It is PR review plumbing for
 scrubbed AI session evidence. See [`docs/COMPARISON.md`](docs/COMPARISON.md)
 for narrative detail.
@@ -63,7 +63,7 @@ clean, and lets you delete the gist later if needed.
 can read the gist. If you put that URL in a public PR body, the transcript is
 effectively public.
 
-`ai-trace pr-attach` **refuses to attach to public-repo PRs by default**.
+`agents-trace pr-attach` **refuses to attach to public-repo PRs by default**.
 Override with `--public-ok` after confirming dry-run output is safe to make
 public. Better: keep this tool to private repos.
 
@@ -79,7 +79,7 @@ Codex session  → ~/.codex/sessions/**/*.jsonl (filtered by recorded cwd)
                           ↓ wrap in fenced "untrusted transcript" blocks
                           ↓ hard gitleaks gate
                           ↓ gh gist create --secret
-                          ↓ gh pr edit --body (appends or updates "🤖 ai-trace: <url>")
+                          ↓ gh pr edit --body (appends or updates "🤖 agents-trace: <url>")
 ```
 
 ## Install
@@ -88,8 +88,8 @@ Requires [`bun`](https://bun.sh), [`gh`](https://cli.github.com), and
 [`gitleaks`](https://github.com/gitleaks/gitleaks).
 
 ```bash
-git clone https://github.com/noamsiegel/ai-trace.git ~/.local/share/ai-trace
-ln -s ~/.local/share/ai-trace/bin/ai-trace ~/.local/bin/ai-trace
+git clone https://github.com/noamsiegel/agents-trace.git ~/.local/share/agents-trace
+ln -s ~/.local/share/agents-trace/bin/agents-trace ~/.local/bin/agents-trace
 ```
 
 Authenticate `gh`:
@@ -102,24 +102,24 @@ gh auth refresh -h github.com -s gist,repo
 ## Usage
 
 ```bash
-ai-trace collect [--pr N] [--source auto|claude|codex]
-ai-trace sessions-since <ref> [--source auto|claude|codex]
-ai-trace gist-create [--pr N] [--source auto|claude|codex]
-ai-trace pr-attach [--pr N] [--source auto|claude|codex]
-ai-trace handoff [--session ID] [--source auto|claude|codex]
-ai-trace scrub-rules
+agents-trace collect [--pr N] [--source auto|claude|codex]
+agents-trace sessions-since <ref> [--source auto|claude|codex]
+agents-trace gist-create [--pr N] [--source auto|claude|codex]
+agents-trace pr-attach [--pr N] [--source auto|claude|codex]
+agents-trace handoff [--session ID] [--source auto|claude|codex]
+agents-trace scrub-rules
 ```
 
 Common flags: `--source auto|claude|codex`, `--dry-run`, `--no-attach`,
 `--force`, `--public-ok`, `--include-code`, `--grace-min N`, `--base <ref>`.
 
 `--source auto` is default. It tries Claude Code sessions for the current repo
-first, then Codex sessions. Codex sessions are global, so `ai-trace` scans the
+first, then Codex sessions. Codex sessions are global, so `agents-trace` scans the
 session tree and keeps only files whose recorded `cwd` equals the repo root.
 
 ## Configuration
 
-`ai-trace` reads optional JSON config from `~/.config/ai-trace/config.json`.
+`agents-trace` reads optional JSON config from `~/.config/agents-trace/config.json`.
 
 Built-in scrubbers run first, in registry order. User-added scrubbers run after
 built-ins. `disable` removes matching built-ins by name. If a user-added
@@ -143,11 +143,11 @@ built-in.
 
 Each `add` entry requires `name`, `pattern`, and `replacement`; `flags` is
 optional and defaults to `g`. Invalid regexes are warned to stderr and skipped.
-Run `ai-trace scrub-rules` to inspect the effective scrubber pipeline.
+Run `agents-trace scrub-rules` to inspect the effective scrubber pipeline.
 
 ## Marker idempotency
 
-`ai-trace pr-attach` recognizes an existing `🤖 ai-trace: <gist-url>` marker,
+`agents-trace pr-attach` recognizes an existing `🤖 agents-trace: <gist-url>` marker,
 edits that gist, and rewrites the PR body without appending a duplicate line.
 
 ## Integrating with your workflow
@@ -160,7 +160,7 @@ gh() {
   command gh "$@"
   local rc=$?
   if [[ "$1" == "pr" && "$2" == "create" && $rc -eq 0 ]]; then
-    ai-trace pr-attach 2>/dev/null || true
+    agents-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }
@@ -170,7 +170,7 @@ gt() {
   command gt "$@"
   local rc=$?
   if [[ "$1" == "submit" && $rc -eq 0 ]]; then
-    ai-trace pr-attach 2>/dev/null || true
+    agents-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }
@@ -179,7 +179,7 @@ gt() {
 ## Related tools
 
 - [git-wt](https://github.com/noamsiegel/git-wt) — parallel-safe worktree CLI for agentic coding.
-- [git-guardrails](https://github.com/noamsiegel/git-guardrails) — pre-commit secret scanning. Complementary to ai-trace's pre-post gitleaks check.
+- [git-guardrails](https://github.com/noamsiegel/git-guardrails) — pre-commit secret scanning. Complementary to agents-trace's pre-post gitleaks check.
 
 ## Status
 

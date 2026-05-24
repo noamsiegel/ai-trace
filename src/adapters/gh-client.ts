@@ -12,8 +12,8 @@ export interface PrContext {
   nameWithOwner: string;
 }
 
-const NEW_MARKER = '🤖 ai-trace:';
-const MARKER_PATTERN = /🤖 ai-trace:\s*https:\/\/gist\.github\.com\/(?:[^/\s]+\/)?([a-f0-9]+)/;
+const NEW_MARKER = '🤖 agents-trace:';
+const MARKER_PATTERN = /🤖 agents-trace:\s*https:\/\/gist\.github\.com\/(?:[^/\s]+\/)?([a-f0-9]+)/;
 
 
 export class GhClient {
@@ -45,13 +45,13 @@ export class GhClient {
     return (JSON.parse(view.stdout).body as string) ?? '';
   }
 
-  async findAttachedAiTraceGist(prBody: string): Promise<string | null> {
+  async findAttachedAgentsTraceGist(prBody: string): Promise<string | null> {
     const m = prBody.match(MARKER_PATTERN);
     return m ? m[1]! : null;
   }
 
-  async upsertAiTraceGist(gistId: string | null, content: string, description: string, public_ = false): Promise<{ id: string; url: string }> {
-    const tmpDir = join(tmpdir(), 'ai-trace-' + Date.now());
+  async upsertAgentsTraceGist(gistId: string | null, content: string, description: string, public_ = false): Promise<{ id: string; url: string }> {
+    const tmpDir = join(tmpdir(), 'agents-trace-' + Date.now());
     mkdirSync(tmpDir, { recursive: true });
     const tmpFile = join(tmpDir, this.filenameFromDescription(description));
     writeFileSync(tmpFile, content);
@@ -72,13 +72,13 @@ export class GhClient {
     return { id: this.gistIdFromUrl(url), url };
   }
 
-  async writeAiTraceLink(prNumber: number, gistUrl: string): Promise<void> {
+  async writeAgentsTraceLink(prNumber: number, gistUrl: string): Promise<void> {
     const view = await this.runner.run('gh', ['pr', 'view', String(prNumber), '--json', 'body']);
     if (view.status !== 0) throw new Error(`gh pr view failed: ${view.stderr.trim()}`);
 
     let body = (JSON.parse(view.stdout).body as string) ?? '';
     if (MARKER_PATTERN.test(body)) {
-      body = body.replaceAll(/🤖 ai-trace:\s*https:\/\/gist\.github\.com\/(?:[^\s]+)/g, `${NEW_MARKER} ${gistUrl}`);
+      body = body.replaceAll(/🤖 agents-trace:\s*https:\/\/gist\.github\.com\/(?:[^\s]+)/g, `${NEW_MARKER} ${gistUrl}`);
     } else {
       body = body.trim() + `\n\n---\n${NEW_MARKER} ${gistUrl}\n`;
     }
@@ -99,6 +99,6 @@ export class GhClient {
 
   private filenameFromDescription(description: string): string {
     const m = description.match(/PR #(\d+)/);
-    return m ? `pr-${m[1]}.md` : 'ai-trace.md';
+    return m ? `pr-${m[1]}.md` : 'agents-trace.md';
   }
 }

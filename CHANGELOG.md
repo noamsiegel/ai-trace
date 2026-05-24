@@ -1,4 +1,10 @@
 # Changelog
+## [Unreleased]
+
+### Changed
+- Rebranded ai-trace to agents-trace: binary, package name, PR marker (`🤖 agents-trace:`), config dir `~/.config/agents-trace`, Homebrew formula `noamsiegel/tap/agents-trace`, GitHub repo `noamsiegel/agents-trace`, and PAI skill path `~/.pai/skills/agents-trace`. No backward compatibility with ai-trace.
+- Bumped version to `0.9.0`.
+
 ## [0.8.2] — RELEASING.md + version-match test
 
 ### Added

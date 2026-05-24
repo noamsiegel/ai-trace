@@ -36,8 +36,8 @@ const flags = (overrides: Partial<PostingPlanInput['flags']> = {}): PostingPlanI
 function expected(input: PostingPlanInput): { allow: boolean; reason: string } {
   if (input.flags.dryRun) return { allow: true, reason: 'dry-run allowed; no network mutation will occur' };
   if (input.gitleaksFindings.length > 0 && !input.flags.force) return { allow: false, reason: `gitleaks found ${input.gitleaksFindings.length} potential secret${input.gitleaksFindings.length === 1 ? '' : 's'}; use --force to override` };
-  if (input.visibility === 'public' && !input.flags.publicOk) return { allow: false, reason: 'public repository requires --public-ok before posting ai-trace gist URL' };
-  if (input.visibility === 'unknown' && !input.flags.publicOk) return { allow: false, reason: 'unknown repository visibility requires --public-ok before posting ai-trace gist URL' };
+  if (input.visibility === 'public' && !input.flags.publicOk) return { allow: false, reason: 'public repository requires --public-ok before posting agents-trace gist URL' };
+  if (input.visibility === 'unknown' && !input.flags.publicOk) return { allow: false, reason: 'unknown repository visibility requires --public-ok before posting agents-trace gist URL' };
   if (input.flags.noAttach && input.action === 'reattach') return { allow: false, reason: '--no-attach is incompatible with re-attach' };
   return { allow: true, reason: 'posting permitted' };
 }
@@ -108,14 +108,14 @@ describe('cmdGistCreate posting-plan integration', () => {
       async readPrBody() {
         return '';
       },
-      async findAttachedAiTraceGist() {
+      async findAttachedAgentsTraceGist() {
         return null;
       },
-      async upsertAiTraceGist() {
+      async upsertAgentsTraceGist() {
         upserts++;
         return { id: '1', url: 'https://gist.github.com/1' };
       },
-      async writeAiTraceLink() {},
+      async writeAgentsTraceLink() {},
     };
     const gitleaksRunner = { async run() { return [] as GitleaksFinding[]; } };
     const args = baseArgs(repo, { dryRun: true });
@@ -152,9 +152,9 @@ describe('cmdGistCreate posting-plan integration', () => {
             return { number: 7, baseRef: 'main', visibility: 'PRIVATE', nameWithOwner: 'owner/repo' };
           },
           async readPrBody() { return ''; },
-          async findAttachedAiTraceGist() { return null; },
-          async upsertAiTraceGist() { upserts++; return { id: '1', url: 'https://gist.github.com/1' }; },
-          async writeAiTraceLink() {},
+          async findAttachedAgentsTraceGist() { return null; },
+          async upsertAgentsTraceGist() { upserts++; return { id: '1', url: 'https://gist.github.com/1' }; },
+          async writeAgentsTraceLink() {},
         },
         gitleaksRunner: { async run() { return [] as GitleaksFinding[]; } },
         planner() {

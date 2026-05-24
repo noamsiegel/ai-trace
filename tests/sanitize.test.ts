@@ -168,9 +168,9 @@ describe('composable scrubber pipeline', () => {
   });
 
   test('loadScrubbers reads disable and add entries from JSON config', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'ai-trace-config-'));
+    const dir = mkdtempSync(join(tmpdir(), 'agents-trace-config-'));
     try {
-      const configDir = join(dir, '.config', 'ai-trace');
+      const configDir = join(dir, '.config', 'agents-trace');
       mkdirSync(configDir, { recursive: true });
       const configPath = join(configDir, 'config.json');
       writeFileSync(

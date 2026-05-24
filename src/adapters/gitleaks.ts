@@ -22,7 +22,7 @@ export class GitleaksRunner {
   constructor(private runner: CommandRunner = realRunner) {}
 
   async run(text: string): Promise<GitleaksFinding[]> {
-    const tmpDir = mkdirSync(join(tmpdir(), 'ai-trace-' + Date.now()), { recursive: true })!;
+    const tmpDir = mkdirSync(join(tmpdir(), 'agents-trace-' + Date.now()), { recursive: true })!;
     const tmpFile = join(tmpDir, 'gist.md');
     writeFileSync(tmpFile, text);
 

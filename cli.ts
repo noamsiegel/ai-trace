@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * ai-trace — capture AI session JSONL as a secret gist
+ * agents-trace — capture AI session JSONL as a secret gist
  * attached to a GitHub PR.
  *
  * Subcommands:
@@ -11,7 +11,7 @@
  *   gist-create [--pr N] [--public]
  *       collect + create a secret (default) gist; print URL.
  *   pr-attach [--pr N]
- *       gist-create + append/update "ai-trace: <url>" in PR description.
+ *       gist-create + append/update "agents-trace: <url>" in PR description.
  *   scrub-rules
  *       Print active scrubber rules.
  *
@@ -35,7 +35,7 @@ import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.8.2';
+const VERSION = '0.9.0';
 
 export interface Args {
   pr?: string;
@@ -136,10 +136,10 @@ function parseArgs(argv: string[]): Args {
 }
 
 function printHelp() {
-  console.log(`ai-trace ${VERSION} — AI session → secret gist → PR description.
+  console.log(`agents-trace ${VERSION} — AI session → secret gist → PR description.
 
 usage:
-  ai-trace <subcommand> [flags]
+  agents-trace <subcommand> [flags]
 
 subcommands:
   collect [--pr N] [--base REF] [--source auto|claude|codex]
@@ -173,7 +173,7 @@ flags:
 }
 
 function die(msg: string, code = 1): never {
-  console.error(`ai-trace: ${msg}`);
+  console.error(`agents-trace: ${msg}`);
   process.exit(code);
 }
 
@@ -237,7 +237,7 @@ async function cmdCollect(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) 
 
 function cmdSessionsSince(args: Args) {
   const ref = args.rest[0];
-  if (!ref) die('usage: ai-trace sessions-since <ref>', 2);
+  if (!ref) die('usage: agents-trace sessions-since <ref>', 2);
   const repoRoot = detectRepoRoot(args.root);
   const range = getCommitTimestampsForRange(ref, repoRoot);
   const all = loadRepoSessions(repoRoot, args.source);
@@ -298,14 +298,14 @@ export async function cmdGistCreate(
   let existingGistId: string | null = null;
   const body = await client.readPrBody(pr.number);
   if (body !== null) {
-    existingGistId = await client.findAttachedAiTraceGist(body);
+    existingGistId = await client.findAttachedAgentsTraceGist(body);
   }
 
-  const gist = await client.upsertAiTraceGist(existingGistId, md, `ai-trace for PR #${pr.number}`, args.public_);
+  const gist = await client.upsertAgentsTraceGist(existingGistId, md, `agents-trace for PR #${pr.number}`, args.public_);
   console.log(gist.url);
   if (args.noAttach) return;
   try {
-    await client.writeAiTraceLink(pr.number, gist.url);
+    await client.writeAgentsTraceLink(pr.number, gist.url);
   } catch (err) {
     die(err instanceof Error ? err.message : String(err));
   }
@@ -459,7 +459,7 @@ async function main() {
       cmdScrubRules(scrubbers);
       break;
     default:
-      die(`unknown subcommand: ${sub} (run 'ai-trace --help')`, 2);
+      die(`unknown subcommand: ${sub} (run 'agents-trace --help')`, 2);
   }
 }
 

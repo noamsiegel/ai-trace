@@ -1,7 +1,7 @@
 /**
- * ai-trace CLI tests.
+ * agents-trace CLI tests.
  *
- * Run: bun test ~/Documents/GitHub/ai-trace/tests/cli.test.ts
+ * Run: bun test ~/Documents/GitHub/agents-trace/tests/cli.test.ts
  *
  * These exercise the pure logic (scrubbers, prompt filtering, time overlap,
  * markdown rendering) without needing live PRs or gh authentication.
@@ -34,7 +34,7 @@ describe('CLI basics', () => {
   test('--help prints usage', () => {
     const r = runCli('--help');
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('ai-trace 0.8.2');
+    expect(r.stdout).toContain('agents-trace 0.9.0');
     expect(r.stdout).toContain('subcommands:');
   });
 

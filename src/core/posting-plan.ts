@@ -38,11 +38,11 @@ export function buildPostingPlan({ visibility, flags, gitleaksFindings, action }
   }
 
   if (visibility === 'public' && !flags.publicOk) {
-    return { allow: false, reason: 'public repository requires --public-ok before posting ai-trace gist URL' };
+    return { allow: false, reason: 'public repository requires --public-ok before posting agents-trace gist URL' };
   }
 
   if (visibility === 'unknown' && !flags.publicOk) {
-    return { allow: false, reason: 'unknown repository visibility requires --public-ok before posting ai-trace gist URL' };
+    return { allow: false, reason: 'unknown repository visibility requires --public-ok before posting agents-trace gist URL' };
   }
 
   if (flags.noAttach && action === 'reattach') {

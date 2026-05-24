@@ -14,6 +14,6 @@ Do not open public issues for security bugs. Include enough detail to reproduce 
 
 ## Security boundaries
 
-`ai-trace` handles Claude Code session transcripts and posts cleaned output to secret gists. Secret gists are URL-protected, not access-controlled; the gist-secrecy model and public-repo safety tradeoff are documented in the README.
+`agents-trace` handles Claude Code session transcripts and posts cleaned output to secret gists. Secret gists are URL-protected, not access-controlled; the gist-secrecy model and public-repo safety tradeoff are documented in the README.
 
 Report any bypass of the public-repo block as a security issue. Also report transcript scrubbing failures, markdown-smuggling bypasses, unsafe session-file reads, gitleaks-gate bypasses, or behavior that attaches unsafe transcript content to a PR without explicit user approval.

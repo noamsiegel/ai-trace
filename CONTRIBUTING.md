@@ -1,6 +1,6 @@
-# Contributing to ai-trace
+# Contributing to agents-trace
 
-Thanks for improving `ai-trace`. Treat transcript handling as security-sensitive: secret gists are URL-protected, not access-controlled.
+Thanks for improving `agents-trace`. Treat transcript handling as security-sensitive: secret gists are URL-protected, not access-controlled.
 
 ## How to report a bug
 
@@ -12,7 +12,7 @@ Open a [feature request](./.github/ISSUE_TEMPLATE/feature.md) with the problem, 
 
 ## Development setup
 
-`ai-trace` is a Bun/TypeScript CLI.
+`agents-trace` is a Bun/TypeScript CLI.
 
 Dependencies:
 

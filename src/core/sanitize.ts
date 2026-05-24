@@ -31,7 +31,7 @@ interface CollectOptions {
 
 export function collectMarkdown(repoRoot: string, prNum: number, baseRef: string, sessions: SessionMeta[], opts: CollectOptions): string {
   const lines: string[] = [];
-  lines.push(`# ai-trace for PR #${prNum}`);
+  lines.push(`# agents-trace for PR #${prNum}`);
   lines.push('');
   lines.push(`Captured: ${new Date().toISOString()}`);
   lines.push(`Repo: ${sanitize(repoRoot, 'audit-block', { scrubbers: opts.scrubbers, includeCode: true })}`);

@@ -6,7 +6,7 @@ labels: [enhancement]
 
 ## Problem statement
 
-What problem should `ai-trace` solve?
+What problem should `agents-trace` solve?
 
 ## Proposed solution
 

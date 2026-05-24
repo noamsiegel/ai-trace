@@ -46,27 +46,27 @@ describe('GhClient', () => {
     expect(plan.allow).toBe(false);
   });
 
-  test('findAttachedAiTraceGist extracts gist IDs from ai-trace marker URLs', async () => {
+  test('findAttachedAgentsTraceGist extracts gist IDs from agents-trace marker URLs', async () => {
     const client = new GhClient(new FakeRunner([]));
 
-    await expect(client.findAttachedAiTraceGist('🤖 ai-trace: https://gist.github.com/noam/feed123')).resolves.toBe('feed123');
-    await expect(client.findAttachedAiTraceGist('no marker')).resolves.toBeNull();
+    await expect(client.findAttachedAgentsTraceGist('🤖 agents-trace: https://gist.github.com/noam/feed123')).resolves.toBe('feed123');
+    await expect(client.findAttachedAgentsTraceGist('no marker')).resolves.toBeNull();
   });
 
-  test('upsertAiTraceGist edits existing gist when marker is attached', async () => {
+  test('upsertAgentsTraceGist edits existing gist when marker is attached', async () => {
     const runner = new FakeRunner([ok('')]);
 
-    const gist = await new GhClient(runner).upsertAiTraceGist('abc123', '# body', 'ai-trace for PR #99');
+    const gist = await new GhClient(runner).upsertAgentsTraceGist('abc123', '# body', 'agents-trace for PR #99');
 
     expect(gist).toEqual({ id: 'abc123', url: 'https://gist.github.com/abc123' });
     expect(runner.calls).toHaveLength(1);
     expect(runner.calls[0]!.args.slice(0, 5)).toEqual(['gist', 'edit', 'abc123', '--filename', 'pr-99.md']);
   });
 
-  test('upsertAiTraceGist falls back to create when editing existing gist fails', async () => {
+  test('upsertAgentsTraceGist falls back to create when editing existing gist fails', async () => {
     const runner = new FakeRunner([fail('not found'), ok('https://gist.github.com/def456\n')]);
 
-    const gist = await new GhClient(runner).upsertAiTraceGist('abc123', '# body', 'ai-trace for PR #5');
+    const gist = await new GhClient(runner).upsertAgentsTraceGist('abc123', '# body', 'agents-trace for PR #5');
 
     expect(gist).toEqual({ id: 'def456', url: 'https://gist.github.com/def456' });
     expect(runner.calls[0]!.args.slice(0, 5)).toEqual(['gist', 'edit', 'abc123', '--filename', 'pr-5.md']);
@@ -74,31 +74,31 @@ describe('GhClient', () => {
     expect(runner.calls[1]!.args[4]).toBe('pr-5.md');
   });
 
-  test('writeAiTraceLink replaces only marker URL and preserves other body content', async () => {
-    const body = ['Intro', '', 'Keep this line https://example.test', '🤖 ai-trace: https://gist.github.com/abc123', '', 'Footer'].join('\n');
+  test('writeAgentsTraceLink replaces only marker URL and preserves other body content', async () => {
+    const body = ['Intro', '', 'Keep this line https://example.test', '🤖 agents-trace: https://gist.github.com/abc123', '', 'Footer'].join('\n');
     const runner = new FakeRunner([ok(JSON.stringify({ body })), ok('')]);
 
-    await new GhClient(runner).writeAiTraceLink(12, 'https://gist.github.com/def456');
+    await new GhClient(runner).writeAgentsTraceLink(12, 'https://gist.github.com/def456');
 
     expect(runner.calls[0]!.args).toEqual(['pr', 'view', '12', '--json', 'body']);
     expect(runner.calls[1]!.args.slice(0, 4)).toEqual(['pr', 'edit', '12', '--body']);
-    expect(runner.calls[1]!.args[4]).toBe(['Intro', '', 'Keep this line https://example.test', '🤖 ai-trace: https://gist.github.com/def456', '', 'Footer'].join('\n'));
+    expect(runner.calls[1]!.args[4]).toBe(['Intro', '', 'Keep this line https://example.test', '🤖 agents-trace: https://gist.github.com/def456', '', 'Footer'].join('\n'));
   });
-  test('writeAiTraceLink replaces new marker URL without duplicating marker', async () => {
-    const body = ['Intro', '🤖 ai-trace: https://gist.github.com/abc123'].join('\n');
+  test('writeAgentsTraceLink replaces new marker URL without duplicating marker', async () => {
+    const body = ['Intro', '🤖 agents-trace: https://gist.github.com/abc123'].join('\n');
     const runner = new FakeRunner([ok(JSON.stringify({ body })), ok('')]);
 
-    await new GhClient(runner).writeAiTraceLink(12, 'https://gist.github.com/def456');
+    await new GhClient(runner).writeAgentsTraceLink(12, 'https://gist.github.com/def456');
 
-    expect(runner.calls[1]!.args[4]).toBe(['Intro', '🤖 ai-trace: https://gist.github.com/def456'].join('\n'));
-    expect((runner.calls[1]!.args[4]!.match(/🤖 ai-trace:/g) ?? [])).toHaveLength(1);
+    expect(runner.calls[1]!.args[4]).toBe(['Intro', '🤖 agents-trace: https://gist.github.com/def456'].join('\n'));
+    expect((runner.calls[1]!.args[4]!.match(/🤖 agents-trace:/g) ?? [])).toHaveLength(1);
   });
 
-  test('writeAiTraceLink appends marker when absent', async () => {
+  test('writeAgentsTraceLink appends marker when absent', async () => {
     const runner = new FakeRunner([ok(JSON.stringify({ body: 'Intro\n\nBody' })), ok('')]);
 
-    await new GhClient(runner).writeAiTraceLink(14, 'https://gist.github.com/def456');
+    await new GhClient(runner).writeAgentsTraceLink(14, 'https://gist.github.com/def456');
 
-    expect(runner.calls[1]!.args[4]).toBe('Intro\n\nBody\n\n---\n🤖 ai-trace: https://gist.github.com/def456\n');
+    expect(runner.calls[1]!.args[4]).toBe('Intro\n\nBody\n\n---\n🤖 agents-trace: https://gist.github.com/def456\n');
   });
 });

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "ai-trace",
+      "name": "agents-trace",
       "devDependencies": {
         "bun-types": "^1.0.0",
       },

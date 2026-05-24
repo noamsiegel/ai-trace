@@ -25,7 +25,7 @@ What happened instead?
 ## Environment
 
 - OS:
-- ai-trace version or commit:
+- agents-trace version or commit:
 - bun version:
 - gh version:
 - gitleaks version:

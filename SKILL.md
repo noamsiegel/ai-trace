@@ -1,9 +1,9 @@
 ---
-name: ai-trace
-description: Capture Claude Code session transcripts as secret gists attached to GitHub PRs. USE WHEN user wants to attach AI trace context to a PR, run ai-trace collect/gist-create/pr-attach, or audit which sessions produced which PR.
+name: agents-trace
+description: Capture Claude Code session transcripts as secret gists attached to GitHub PRs. USE WHEN user wants to attach AI trace context to a PR, run agents-trace collect/gist-create/pr-attach, or audit which sessions produced which PR.
 ---
 
-# ai-trace
+# agents-trace
 
 Captures Claude Code session JSONL transcripts as **secret GitHub gists**
 linked from PR descriptions, so reviewers can audit "what was asked" without
@@ -16,20 +16,20 @@ Claude Code session in some repo
    ↓
 ~/.claude/projects/<encoded-cwd>/*.jsonl   ← deterministic capture (Claude writes this)
    ↓
-ai-trace collect [--pr <num>]
+agents-trace collect [--pr <num>]
    ↓ filter by time overlap with PR's commits
    ↓ strip noise (system messages, tool internals)
    ↓ run scrubbers (api keys, emails, home paths)
    ↓
 cleaned markdown
    ↓
-ai-trace gist-create     ← gh gist create --secret
+agents-trace gist-create     ← gh gist create --secret
    ↓
 secret gist URL
    ↓
-ai-trace pr-attach       ← appends to PR description
+agents-trace pr-attach       ← appends to PR description
    ↓
-"🤖 ai-trace: <gist-url>"
+"🤖 agents-trace: <gist-url>"
 ```
 
 ## Commands
@@ -51,7 +51,7 @@ Common flags:
 
 ## Configuration
 
-`~/.config/ai-trace/config.json`:
+`~/.config/agents-trace/config.json`:
 
 ```json
 {
@@ -85,20 +85,20 @@ Common flags:
 ## Files
 
 - `cli.ts` — the CLI implementation (Bun/TS)
-- `ai-trace` — installed CLI command
-- `~/.config/ai-trace/config.json` — scrubber rules + thresholds (optional)
+- `agents-trace` — installed CLI command
+- `~/.config/agents-trace/config.json` — scrubber rules + thresholds (optional)
 
 ## Integrating with your PR workflow
 
-Add to your shell rc (`~/.zshrc` or `~/.bashrc`) to auto-attach ai-trace context on PR creation:
+Add to your shell rc (`~/.zshrc` or `~/.bashrc`) to auto-attach agents-trace context on PR creation:
 
 ```bash
-# After `gh pr create` succeeds, attach ai-trace context.
+# After `gh pr create` succeeds, attach agents-trace context.
 gh() {
   command gh "$@"
   local rc=$?
   if [[ "$1" == "pr" && "$2" == "create" && $rc -eq 0 ]]; then
-    ai-trace pr-attach 2>/dev/null || true
+    agents-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }
@@ -108,7 +108,7 @@ gt() {
   command gt "$@"
   local rc=$?
   if [[ "$1" == "submit" && $rc -eq 0 ]]; then
-    ai-trace pr-attach 2>/dev/null || true
+    agents-trace pr-attach 2>/dev/null || true
   fi
   return $rc
 }

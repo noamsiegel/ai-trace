@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file orients agents working on **ai-trace** itself. Read `CONTEXT.md` for
+This file orients agents working on **agents-trace** itself. Read `CONTEXT.md` for
 load-bearing invariants: public PR refusal, gitleaks gate, untrusted transcript
 hardening, safe JSONL reads, scoped session selection, and idempotent PR marker
 writes. See `README.md` for user-facing behavior.
@@ -19,9 +19,9 @@ writes. See `README.md` for user-facing behavior.
   safe-read checks, or PR marker idempotency to make a test pass.
 - Never commit, tag, push, publish releases, bump the Homebrew tap, or sync the
   PAI skill mirror unless the user explicitly asks for that release step.
-- Dogfood `ai-trace`: AI-authored PRs must run `ai-trace pr-attach` and carry
-  exactly one `🤖 ai-trace:` marker; direct emergency pushes without a PR must
-  run `ai-trace gist-create` or `ai-trace collect` for local audit evidence.
+- Dogfood `agents-trace`: AI-authored PRs must run `agents-trace pr-attach` and carry
+  exactly one `🤖 agents-trace:` marker; direct emergency pushes without a PR must
+  run `agents-trace gist-create` or `agents-trace collect` for local audit evidence.
 - Do not add abstract adapter interfaces unless there are at least two real
   implementations or a concrete testability/locality gain that passes the
   deletion test.
@@ -40,7 +40,7 @@ placeholder block below.
 - `CHANGELOG.md` — release history and security-relevant behavior changes.
 - `docs/COMPARISON.md` — narrative comparison with adjacent agent-session,
   observability, and supply-chain provenance tools.
-- `SKILL.md` — PAI skill wrapper for invoking ai-trace from agent workflows.
+- `SKILL.md` — PAI skill wrapper for invoking agents-trace from agent workflows.
 - `CONTRIBUTING.md` — contribution workflow and local test expectations.
 - `SECURITY.md` — vulnerability reporting and supported security posture.
 

@@ -1,10 +1,10 @@
 {
-  "name": "ai-trace",
-  "version": "0.8.2",
+  "name": "agents-trace",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
   "bin": {
-    "ai-trace": "./cli.ts"
+    "agents-trace": "./cli.ts"
   },
   "devDependencies": {
     "bun-types": "^1.0.0"

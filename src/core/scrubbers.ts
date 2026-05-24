@@ -145,7 +145,7 @@ export function composeScrubbers(userConfig: UserScrubberConfig = {}): Scrubber[
     try {
       pattern = new RegExp(entry.pattern, entry.flags ?? 'g');
     } catch (e) {
-      console.error(`ai-trace: bad scrubber regex '${entry.name}': ${(e as Error).message}`);
+      console.error(`agents-trace: bad scrubber regex '${entry.name}': ${(e as Error).message}`);
       continue;
     }
 
@@ -163,14 +163,14 @@ export function composeScrubbers(userConfig: UserScrubberConfig = {}): Scrubber[
   return scrubbers.filter((scrubber) => scrubber.enabled);
 }
 
-export function loadScrubberConfig(configJson = join(homedir(), '.config', 'ai-trace', 'config.json')): UserScrubberConfig {
+export function loadScrubberConfig(configJson = join(homedir(), '.config', 'agents-trace', 'config.json')): UserScrubberConfig {
   if (!existsSync(configJson)) return {};
 
   try {
     const parsed = JSON.parse(readFileSync(configJson, 'utf8')) as UserScrubberConfig | LegacyScrubberConfig;
     return normalizeScrubberConfig(parsed);
   } catch (e) {
-    console.error(`ai-trace: could not load ${configJson}: ${(e as Error).message}`);
+    console.error(`agents-trace: could not load ${configJson}: ${(e as Error).message}`);
     return {};
   }
 }
