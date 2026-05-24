@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.0] — GhClient adapter
+
+### Added
+- Extracted all GitHub CLI interactions into concrete `src/adapters/gh-client.ts`.
+- Added fake-runner `GhClient` tests for PR context parsing, visibility propagation, gist re-attach, edit-failure create fallback, and PR body marker replacement.
+
+### Changed
+- `cli.ts` no longer invokes `gh` directly; gist upsert and PR body mutation now route through `GhClient`.
+- `provenance --help` reports `0.5.0`.
+
 ## [0.4.0] — pure core extraction
 
 ### Added

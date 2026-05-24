@@ -34,8 +34,9 @@ import { join, resolve } from 'node:path';
 import { buildPostingPlan } from './src/core/posting-plan.ts';
 import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isRealPrompt, extractTextFromContent } from './src/core/session.ts';
 import { collectMarkdown, loadScrubbers, sanitize } from './src/core/sanitize.ts';
+import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 const HOME = homedir();
 const CLAUDE_PROJECTS = join(HOME, '.claude', 'projects');
@@ -186,40 +187,14 @@ function detectRepoRoot(override?: string): string {
   return r.stdout.trim();
 }
 
-interface PrInfo {
-  number: number;
-  baseRef: string;
-  visibility: 'PUBLIC' | 'PRIVATE' | 'INTERNAL' | 'UNKNOWN';
-  nameWithOwner: string;
-}
-
-function detectPr(args: Args): PrInfo {
-  const fields = 'number,baseRefName,headRepository';
-  let raw: string;
-  if (args.pr) {
-    const m = args.pr.match(/(?:\/pull\/)?(\d+)$/);
-    const num = m ? Number.parseInt(m[1]!, 10) : Number.NaN;
-    if (Number.isNaN(num)) die(`could not parse PR number from --pr ${args.pr}`);
-    const meta = run('gh', ['pr', 'view', String(num), '--json', fields]);
-    if (meta.status !== 0) die(`gh pr view ${num} failed: ${meta.stderr.trim()}`);
-    raw = meta.stdout;
-  } else {
-    const meta = run('gh', ['pr', 'view', '--json', fields]);
-    if (meta.status !== 0) die(`no PR for current branch (run with --pr <num>): ${meta.stderr.trim()}`);
-    raw = meta.stdout;
+async function detectPr(args: Args, repoRoot: string): Promise<PrContext> {
+  const client = new GhClient();
+  try {
+    const pr = await client.readPrContext(repoRoot, args.pr);
+    return { ...pr, baseRef: args.base ?? pr.baseRef };
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
   }
-  const data = JSON.parse(raw);
-  // C1: repo visibility is the gate for public-repo block.
-  // We read the head repo (where the gist will be associated), not the base repo.
-  // For PRs against the same repo (no fork), these are identical.
-  const visMeta = run('gh', ['repo', 'view', data.headRepository?.nameWithOwner ?? '', '--json', 'visibility,nameWithOwner']);
-  const visData = visMeta.status === 0 ? JSON.parse(visMeta.stdout) : null;
-  return {
-    number: data.number,
-    baseRef: args.base ?? data.baseRefName,
-    visibility: (visData?.visibility ?? 'UNKNOWN') as PrInfo['visibility'],
-    nameWithOwner: visData?.nameWithOwner ?? data.headRepository?.nameWithOwner ?? '',
-  };
 }
 
 function getCommitTimestampsForRange(base: string, repoRoot: string): { min: number; max: number; count: number } {
@@ -249,9 +224,9 @@ function gitleaksCheck(content: string): { ok: boolean; report: string } {
   return { ok: r.status === 0, report: r.stdout + r.stderr };
 }
 
-function cmdCollect(args: Args) {
+async function cmdCollect(args: Args) {
   const repoRoot = detectRepoRoot(args.root);
-  const pr = detectPr(args);
+  const pr = await detectPr(args, repoRoot);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
   const all = loadRepoSessions(repoRoot, CLAUDE_PROJECTS);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
@@ -280,9 +255,9 @@ function cmdSessionsSince(args: Args) {
   }
 }
 
-function cmdGistCreate(args: Args) {
+async function cmdGistCreate(args: Args) {
   const repoRoot = detectRepoRoot(args.root);
-  const pr = detectPr(args);
+  const pr = await detectPr(args, repoRoot);
 
   const visibilityPlan = buildPostingPlan({
     visibility: pr.visibility,
@@ -344,74 +319,27 @@ function cmdGistCreate(args: Args) {
     return;
   }
 
-  // Find an existing gist URL in the PR body so we can update IN PLACE
-  // instead of creating a new gist on every re-attach.
-  const existingGistId = findExistingGistId(pr.number);
-
-  const tmp = join(tmpdir(), `provenance-pr-${pr.number}.md`);
-  writeFileSync(tmp, md);
-
-  let url: string;
-  if (existingGistId) {
-    const editOut = run('gh', ['gist', 'edit', existingGistId, '--filename', `pr-${pr.number}.md`, tmp]);
-    if (editOut.status !== 0) {
-      console.error(`provenance: could not update existing gist ${existingGistId} (${editOut.stderr.trim()}); creating a new one.`);
-      const created = createGist(args.public_, pr.number, tmp);
-      url = created;
-    } else {
-      // gh gist edit doesn't print the URL; reconstruct.
-      url = `https://gist.github.com/${existingGistId}`;
-      console.error(`provenance: updated existing gist ${existingGistId} in place`);
-    }
-  } else {
-    url = createGist(args.public_, pr.number, tmp);
+  const client = new GhClient();
+  let existingGistId: string | null = null;
+  const body = await client.readPrBody(pr.number);
+  if (body !== null) {
+    existingGistId = await client.findAttachedProvenanceGist(body);
   }
 
-  console.log(url);
+  const gist = await client.upsertProvenanceGist(existingGistId, md, `AI provenance for PR #${pr.number}`, args.public_);
+  console.log(gist.url);
   if (args.noAttach) return;
-  attachToPr(pr.number, url);
-}
-
-function createGist(public_: boolean, prNum: number, srcFile: string): string {
-  const visibilityFlag = public_ ? '--public' : '--secret';
-  const ghOut = run('gh', ['gist', 'create', visibilityFlag, '--filename', `pr-${prNum}.md`, srcFile]);
-  if (ghOut.status !== 0) die(`gh gist create failed: ${ghOut.stderr.trim()}`);
-  return ghOut.stdout.trim().split('\n').pop()!;
-}
-
-function findExistingGistId(prNum: number): string | null {
-  const view = run('gh', ['pr', 'view', String(prNum), '--json', 'body']);
-  if (view.status !== 0) return null;
-  let body: string;
   try {
-    body = (JSON.parse(view.stdout).body as string) ?? '';
-  } catch {
-    return null;
+    await client.writeProvenanceLink(pr.number, gist.url);
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
   }
-  // Match: "🤖 AI Provenance: https://gist.github.com/<owner>/<gist-id>"
-  // or:    "🤖 AI Provenance: https://gist.github.com/<gist-id>"
-  const m = body.match(/🤖 AI Provenance:\s*https:\/\/gist\.github\.com\/(?:[^/\s]+\/)?([a-f0-9]+)/);
-  return m ? m[1]! : null;
+  console.error(`attached to PR #${pr.number}`);
 }
 
-function attachToPr(prNum: number, gistUrl: string) {
-  const view = run('gh', ['pr', 'view', String(prNum), '--json', 'body']);
-  if (view.status !== 0) die(`gh pr view failed: ${view.stderr.trim()}`);
-  let body = (JSON.parse(view.stdout).body as string) ?? '';
-  const marker = '🤖 AI Provenance:';
-  if (body.includes(marker)) {
-    // Replace existing line.
-    body = body.replaceAll(new RegExp(`${marker} \\S+`, 'g'), `${marker} ${gistUrl}`);
-  } else {
-    body = body.trim() + `\n\n---\n${marker} ${gistUrl}\n`;
-  }
-  const r = run('gh', ['pr', 'edit', String(prNum), '--body', body]);
-  if (r.status !== 0) die(`gh pr edit failed: ${r.stderr.trim()}`);
-  console.error(`attached to PR #${prNum}`);
-}
 
-function cmdPrAttach(args: Args) {
-  cmdGistCreate(args);
+async function cmdPrAttach(args: Args) {
+  await cmdGistCreate(args);
 }
 
 function cmdHandoff(args: Args) {
@@ -530,7 +458,7 @@ function cmdScrubRules() {
   }
 }
 
-function main() {
+async function main() {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
     printHelp();
@@ -540,16 +468,16 @@ function main() {
   const args = parseArgs(argv.slice(1));
   switch (sub) {
     case 'collect':
-      cmdCollect(args);
+      await cmdCollect(args);
       break;
     case 'sessions-since':
       cmdSessionsSince(args);
       break;
     case 'gist-create':
-      cmdGistCreate(args);
+      await cmdGistCreate(args);
       break;
     case 'pr-attach':
-      cmdPrAttach(args);
+      await cmdPrAttach(args);
       break;
     case 'handoff':
       cmdHandoff(args);
