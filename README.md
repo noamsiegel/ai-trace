@@ -22,13 +22,37 @@ confusing a reviewer who expects cryptographic supply-chain provenance.
 
 ## Adjacent tools
 
-| Tool | What they do | What ai-trace does that they don't |
-|---|---|---|
-| Goose | Agent runtime with JSON/Markdown session export. | Scrubs transcripts, gates with gitleaks, and attaches a secret gist to a PR. |
-| Aider | Pair-programming CLI with chat/LLM history files. | Publishes review-ready evidence for GitHub PRs with public-repo safety checks. |
-| Codex CLI | Stores local JSONL sessions for resume. | Converts Codex sessions into the same scrubbed PR audit artifact as Claude Code. |
-| OpenInference | OpenTelemetry-compatible AI observability trace schema. | Produces a human-readable PR artifact without requiring instrumentation or OTLP. |
-| GitHub artifact attestations | Signed SLSA/in-toto provenance for build artifacts. | Captures prompts and AI coding intent; not a build attestation system. |
+| Tool | What it captures | Where it stores | When it runs |
+|---|---|---|---|
+| **ai-trace** | Claude Code + Codex CLI local JSONL sessions; prompts/code intent filtered by PR time/file overlap; scrubbed and gitleaks-gated | Secret GitHub gist linked from PR body as `🤖 ai-trace:` | On-demand or after PR creation/Graphite submit |
+| Goose | Goose agent sessions; documented JSON/Markdown exports | Exported local files/artifacts from Goose session export | On-demand session export |
+| Aider | Chat history and optional LLM history for Aider pair-programming sessions | Local history files such as `.aider.chat.history.md` / LLM history | During Aider use; restored/exported on demand |
+| Codex CLI | Codex session JSONL used for resume | Local `~/.codex/sessions/**/*.jsonl` | During Codex CLI use; consumed by ai-trace on demand |
+| codex-transcript-viewer | Codex JSONL session logs rendered for reading | Single-file HTML transcript artifact | On-demand after Codex sessions exist |
+| Cline | Cline agent sessions/checkpoints and headless JSON output; plugin hooks can log/audit events | Cline workspace/session surfaces or plugin-defined sinks | Runtime inside Cline/IDE/CLI |
+| OpenInference | AI observability spans: LLM, agent, tool, retriever, chain events via OpenTelemetry conventions | OTLP-compatible observability backends/traces | Runtime instrumentation |
+| GitHub artifact attestations | Build artifact subjects, digests, predicates, SLSA/in-toto provenance | GitHub attestation store; verifiable with `gh attestation verify` | CI/build workflows |
+| Sigstore / in-toto | Signed supply-chain metadata, artifact signatures, layouts/link metadata | Transparency logs / attestations / OCI or blob signatures | Build/release/signing workflows |
+
+`ai-trace` is narrower: it is not an agent runtime, trace backend,
+transcript UI, or build attestation system. It is PR review plumbing for
+scrubbed AI session evidence. See [`docs/COMPARISON.md`](docs/COMPARISON.md)
+for narrative detail.
+
+## What it doesn't do
+
+- It does not create cryptographic build provenance, SLSA predicates, in-toto
+  link metadata, or Sigstore/GitHub artifact attestations.
+- It does not make secret gists private or access-controlled; PR visibility and
+  gist URL handling remain your responsibility.
+- It does not replace Claude Code, Codex CLI, Goose, Aider, Cline, or any other
+  agent runtime; it consumes transcripts they already wrote.
+- It does not provide an observability backend, OpenTelemetry collector, trace
+  store, or dashboard.
+- It does not provide a transcript viewer UI; markdown gist output is optimized
+  for lightweight PR review.
+- It does not guarantee every prompt influenced a PR; selection is based on
+  recorded repo/session data, time overlap, and file overlap.
 
 ## Why this design
 

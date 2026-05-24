@@ -35,7 +35,7 @@ import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 
 export interface Args {
   pr?: string;

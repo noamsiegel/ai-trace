@@ -1,4 +1,15 @@
 # Changelog
+## [0.8.1] — docs + architecture map
+
+### Added
+- `CONTEXT.md` with load-bearing invariants, module map, real vs hypothetical seams, public CLI stability, and ADRs (matches the agents-toc convention).
+- `AGENTS.md` orienting agents working on this repo itself.
+- `docs/COMPARISON.md` with full narrative competitor analysis (Goose, Aider, Codex CLI, codex-transcript-viewer, Cline, OpenInference, GitHub artifact attestations, Sigstore/in-toto).
+
+### Changed
+- `README.md` adjacent-tools section reformatted to the agents-toc-style table (`Tool | What it captures | Where it stores | When it runs`) and links to the new comparison doc.
+- Added explicit `## What it doesn’t do` section to clarify scope versus build provenance, transcript UI, observability backends, and access control.
+
 ## [0.8.0] — ai-trace rebrand + Codex sessions
 
 ### Added
