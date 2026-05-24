@@ -12,8 +12,12 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { encodeCwd, loadRepoSessions, type SessionMeta } from '../src/core/session.ts';
+import { normalizeToRepoRelative, intersectsScope } from '../src/core/scope.ts';
+import { sanitize, type ScrubRule } from '../src/core/sanitize.ts';
+import { buildPostingPlan, type RepoVisibility } from '../src/core/posting-plan.ts';
 
-const CLI = `${process.env.HOME}/.pai/skills/provenance/cli.ts`;
+const CLI = new URL('../cli.ts', import.meta.url).pathname;
 
 interface Result {
   status: number | null;
@@ -78,7 +82,7 @@ describe('collect end-to-end with synthetic session', () => {
     g('branch', '--set-upstream-to', 'main');
 
     // Encode the repo path: /var/folders/.../pp-home-XXX/repo → -var-folders-...-pp-home-XXX-repo
-    const encoded = repo.replaceAll('/', '-');
+    const encoded = encodeCwd(repo);
     const sessionDir = join(projectsDir, encoded);
     mkdirSync(sessionDir, { recursive: true });
 
@@ -148,57 +152,29 @@ describe('Scrubber semantics', () => {
 });
 
 describe('C2 — transcript content is treated as untrusted', () => {
-  let fakeHome: string;
-  let repo: string;
+  test('sanitize audit-block strips code blocks, neutralizes links/html, escapes fences, and merges custom scrubbers', () => {
+    const custom: ScrubRule = { id: 'ticket', pattern: /TICKET-[0-9]+/g, replacement: '[REDACTED-TICKET]' };
+    const out = sanitize(
+      'See [label](https://evil.example) ![alt](https://img.example) <script>x</script> TICKET-123\n' +
+        '```ts\nconst secret = "x";\n```\n```',
+      'audit-block',
+      { scrubbers: [custom] },
+    );
 
-  beforeEach(() => {
-    fakeHome = mkdtempSync(join(tmpdir(), 'pp-c2-'));
-    const projectsDir = join(fakeHome, '.claude', 'projects');
-    mkdirSync(projectsDir, { recursive: true });
-    repo = join(fakeHome, 'repo');
-    mkdirSync(repo);
-    const g = (...a: string[]) => spawnSync('git', ['-C', repo, ...a]);
-    g('init', '-q', '-b', 'main');
-    g('config', 'user.email', 't@e.com');
-    g('config', 'user.name', 'T');
-    writeFileSync(join(repo, 'a.txt'), 'a');
-    g('add', '.');
-    g('commit', '-q', '-m', 'feat: init');
-    g('checkout', '-q', '-b', 'feature');
-    writeFileSync(join(repo, 'a.txt'), 'aa');
-    g('add', '.');
-    g('commit', '-q', '-m', 'feat: change');
-    g('branch', '--set-upstream-to', 'main');
-
-    const encoded = repo.replaceAll('/', '-');
-    const sessionDir = join(projectsDir, encoded);
-    mkdirSync(sessionDir, { recursive: true });
-    const now = Date.now();
-    const rows = [
-      // Prompt with a malicious markdown link.
-      { type: 'user', timestamp: new Date(now - 1000).toISOString(), message: { content: 'See [definitely-not-malicious](https://evil.example/payload) and also <script>alert(1)</script>' } },
-      // Prompt with backticks-3 that could break the gist fence.
-      { type: 'user', timestamp: new Date(now - 900).toISOString(), message: { content: 'Triple-backtick test:\n```js\nconst x = 1;\n```\nand markdown img ![alt](https://evil.example/track.png)' } },
-    ];
-    writeFileSync(join(sessionDir, 'session1.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n'));
+    expect(out).toContain('label (https://evil.example)');
+    expect(out).toContain('[image: https://img.example]');
+    expect(out).not.toContain('<script>');
+    expect(out).toContain('[REDACTED-TICKET]');
+    expect(out).toContain('[code block stripped]');
+    expect(out).not.toContain('```');
+    expect(out).toContain('` ` `');
   });
 
-  afterEach(() => {
-    rmSync(fakeHome, { recursive: true, force: true });
-  });
+  test('sanitize handoff-inline collapses whitespace, keeps code text, neutralizes markdown, and truncates', () => {
+    const out = sanitize('one\n[two](https://example.test)   ```js\nthree\n``` four', 'handoff-inline', { maxLength: 40 });
 
-  test('markdown links are neutralized to plain text', () => {
-    const g = (...a: string[]) => spawnSync('git', ['-C', repo, ...a]);
-    g('checkout', '-q', 'main');
-    // collect requires a real PR; bypass by calling sessions-since which uses the same render path?
-    // Actually, only collect renders prompts. We invoke it via cmdCollect through CLI,
-    // but cmdCollect needs --pr. Simulate by checking that the cli HELP mentions --public-ok
-    // for the C1 path, and use a unit-style assertion on neutralization rules by reading
-    // the cli.ts and confirming the function exists. That's brittle — use cli output instead.
-
-    // Workaround: invoke the cli with PRINT_TRANSCRIPT_DEBUG=1 if we had one. We don't.
-    // Skip this assertion in MVP; integration test below covers the same logic end-to-end.
-    expect(true).toBe(true);
+    expect(out).toBe('one two (https://example.test) ` ` `js t');
+    expect(out.length).toBe(40);
   });
 });
 
@@ -211,7 +187,7 @@ describe('C3 — JSONL reading rejects unsafe files', () => {
     fakeHome = mkdtempSync(join(tmpdir(), 'pp-c3-'));
     projectsDir = join(fakeHome, '.claude', 'projects');
     mkdirSync(projectsDir, { recursive: true });
-    encoded = '-fake-repo';
+    encoded = encodeCwd('/fake/repo');
     mkdirSync(join(projectsDir, encoded));
   });
 
@@ -220,20 +196,63 @@ describe('C3 — JSONL reading rejects unsafe files', () => {
   });
 
   test('symlinked .jsonl is ignored', () => {
-    // Create a target jsonl elsewhere and symlink it into the projects dir.
     const real = join(fakeHome, 'real.jsonl');
     writeFileSync(real, JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { content: 'evil' } }));
     spawnSync('ln', ['-s', real, join(projectsDir, encoded, 'symlinked.jsonl')]);
 
-    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--root', join(fakeHome, 'repo-that-does-not-exist')], {
-      encoding: 'utf8',
-      env: { ...process.env, HOME: fakeHome },
-    });
-    // The repo arg is fake so sessions-since will fail upstream; the C3 check
-    // is exercised inside loadSessionsForRepo. We verify by directly invoking
-    // an internal helper isn't possible from black-box CLI, so we settle for
-    // the end-to-end check that no symlinked content can leak via collect (the
-    // C1 visibility guard would also prevent that on public repos). Skip.
-    expect(r.status).not.toBe(0); // either fails on git or returns no sessions
+    expect(loadRepoSessions('/fake/repo', projectsDir)).toEqual([]);
+  });
+});
+
+describe('Core session and scope helpers', () => {
+  test('encodeCwd replaces slashes and dots', () => {
+    expect(encodeCwd('/tmp/foo.bar')).toBe('-tmp-foo-bar');
+    expect(encodeCwd('/Users/noam.siegel/some/repo')).toBe('-Users-noam-siegel-some-repo');
+  });
+
+  test('normalizeToRepoRelative handles absolute, relative, and outside-repo paths', () => {
+    const scope = normalizeToRepoRelative(['/repo/src/a.ts', 'src/b.ts', '/elsewhere/src/c.ts', '../outside.ts'], '/repo');
+
+    expect(scope.repoRelative).toEqual(new Set(['src/a.ts', 'src/b.ts']));
+  });
+
+  test('intersectsScope does not false-match basename collisions', () => {
+    const session: SessionMeta = {
+      path: 's.jsonl',
+      firstTs: 0,
+      lastTs: 1,
+      promptCount: 1,
+      filesTouched: new Set(['/repo/packages/a/src/index.ts']),
+    };
+
+    expect(intersectsScope(session, normalizeToRepoRelative(['packages/b/src/index.ts'], '/repo'), '/repo')).toBe(false);
+    expect(intersectsScope(session, normalizeToRepoRelative(['packages/a/src/index.ts'], '/repo'), '/repo')).toBe(true);
+  });
+});
+
+describe('Posting plan', () => {
+  const visibilities: RepoVisibility[] = ['PUBLIC', 'UNKNOWN', 'PRIVATE'];
+
+  test('visibility gates attaching unless explicitly overridden', () => {
+    for (const visibility of visibilities) {
+      const plan = buildPostingPlan({ visibility, flags: {}, gitleaksResult: { ok: true }, action: 'gist-create' });
+      expect(plan.allow).toBe(visibility === 'PRIVATE');
+    }
+
+    expect(buildPostingPlan({ visibility: 'PUBLIC', flags: { publicOk: true }, gitleaksResult: { ok: true }, action: 'gist-create' }).allow).toBe(true);
+    expect(buildPostingPlan({ visibility: 'UNKNOWN', flags: { publicOk: true }, gitleaksResult: { ok: true }, action: 'gist-create' }).allow).toBe(true);
+  });
+
+  test('no-attach avoids public visibility attach gate', () => {
+    expect(buildPostingPlan({ visibility: 'PUBLIC', flags: { noAttach: true }, gitleaksResult: { ok: true }, action: 'gist-create' }).allow).toBe(true);
+  });
+
+  test('dry-run does not override gitleaks without force', () => {
+    expect(buildPostingPlan({ visibility: 'PRIVATE', flags: { dryRun: true }, gitleaksResult: { ok: false }, action: 'gist-create' }).allow).toBe(false);
+  });
+
+  test('force overrides gitleaks failure after visibility passes', () => {
+    expect(buildPostingPlan({ visibility: 'PRIVATE', flags: { force: true }, gitleaksResult: { ok: false }, action: 'gist-create' }).allow).toBe(true);
+    expect(buildPostingPlan({ visibility: 'PUBLIC', flags: { force: true }, gitleaksResult: { ok: false }, action: 'gist-create' }).allow).toBe(false);
   });
 });

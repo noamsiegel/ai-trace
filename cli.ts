@@ -27,18 +27,18 @@
  *   --help, -h
  */
 
-import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir, userInfo } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { buildPostingPlan } from './src/core/posting-plan.ts';
+import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isRealPrompt, extractTextFromContent } from './src/core/session.ts';
+import { collectMarkdown, loadScrubbers, sanitize } from './src/core/sanitize.ts';
 
-// Caps to prevent runaway reads on attacker-influenced files.
-const MAX_JSONL_BYTES = 20 * 1024 * 1024; // 20MB per session file
-const MAX_JSONL_ROWS = 50000;
+const VERSION = '0.4.0';
 
 const HOME = homedir();
 const CLAUDE_PROJECTS = join(HOME, '.claude', 'projects');
-const CONFIG_FILE = join(HOME, '.config', 'provenance', 'config.yaml');
 
 interface Args {
   pr?: string;
@@ -56,40 +56,6 @@ interface Args {
   publicOk: boolean;
   rest: string[];
 }
-
-interface ScrubRule {
-  id: string;
-  pattern: RegExp;
-  replacement: string;
-}
-
-const DEFAULT_SCRUBBERS: ScrubRule[] = [
-  // Cloud / service tokens.
-  { id: 'github-pat', pattern: /\b(ghp_|github_pat_|gho_|ghu_|ghs_|ghr_)[A-Za-z0-9_]{20,}\b/g, replacement: '[REDACTED-GITHUB-TOKEN]' },
-  { id: 'aws-access-key', pattern: /\b(AKIA|ASIA|AROA|AIDA|AGPA|AIPA|ANPA|ANVA|ASCA|APKA)[0-9A-Z]{16}\b/g, replacement: '[REDACTED-AWS-ACCESS-KEY]' },
-  { id: 'gcp-service-account', pattern: /\b[a-z0-9-]+@[a-z0-9-]+\.iam\.gserviceaccount\.com\b/g, replacement: '[REDACTED-GCP-SA]' },
-  { id: 'slack-token', pattern: /\bxox[bpoars]-[A-Za-z0-9-]{10,}\b/g, replacement: '[REDACTED-SLACK-TOKEN]' },
-  { id: 'stripe-live', pattern: /\bsk_live_[A-Za-z0-9]{20,}\b/g, replacement: '[REDACTED-STRIPE-LIVE]' },
-  { id: 'openai-key', pattern: /\bsk-[A-Za-z0-9]{20,}\b/g, replacement: '[REDACTED-OPENAI-KEY]' },
-  { id: 'anthropic-key', pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/g, replacement: '[REDACTED-ANTHROPIC-KEY]' },
-  { id: 'sentry-dsn', pattern: /\bhttps:\/\/[a-f0-9]{32}@[a-zA-Z0-9.-]+\/[0-9]+\b/g, replacement: '[REDACTED-SENTRY-DSN]' },
-  // Generic credential assignments.
-  {
-    id: 'api-keys',
-    pattern: /(?<prefix>(?:api[_-]?key|secret|token|password|bearer|authorization)["\s:=]+)[A-Za-z0-9_\-./+=]{16,}/gi,
-    replacement: '$<prefix>[REDACTED-CREDENTIAL]',
-  },
-  // Private-key blocks.
-  { id: 'private-key-block', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, replacement: '[REDACTED-PRIVATE-KEY-BLOCK]' },
-  // JWTs (3 base64url segments separated by `.`).
-  { id: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, replacement: '[REDACTED-JWT]' },
-  // Database URLs with basic auth.
-  { id: 'db-url-auth', pattern: /\b([a-z][a-z0-9+]*):\/\/[^:\s/@]+:[^@\s]+@/gi, replacement: '$1://[REDACTED-AUTH]@' },
-  // PII.
-  { id: 'emails', pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, replacement: '[REDACTED-EMAIL]' },
-  { id: 'home-paths', pattern: /\/Users\/[^/\s]+\//g, replacement: '/Users/REDACTED/' },
-  { id: 'home-paths-linux', pattern: /\/home\/[^/\s]+\//g, replacement: '/home/REDACTED/' },
-];
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
@@ -164,7 +130,7 @@ function parseArgs(argv: string[]): Args {
 }
 
 function printHelp() {
-  console.log(`provenance — Claude session → secret gist → PR description.
+  console.log(`provenance ${VERSION} — Claude session → secret gist → PR description.
 
 usage:
   provenance <subcommand> [flags]
@@ -211,12 +177,6 @@ function run(cmd: string, args: string[], opts: { input?: string; cwd?: string }
 
 function git(args: string[], cwd?: string): { status: number; stdout: string; stderr: string } {
   return run('git', cwd ? ['-C', cwd, ...args] : args);
-}
-
-// Encode a repo path the way Claude Code does: replace BOTH `/` and `.` with `-`.
-// e.g. /Users/noam.siegel/Documents/GitHub/foo → -Users-noam-siegel-Documents-GitHub-foo
-function encodeCwd(p: string): string {
-  return p.replaceAll('/', '-').replaceAll('.', '-');
 }
 
 function detectRepoRoot(override?: string): string {
@@ -280,329 +240,6 @@ function getDiffFilesForRange(base: string, repoRoot: string): Set<string> {
   return new Set(r.stdout.split('\n').filter(Boolean));
 }
 
-interface SessionMeta {
-  path: string;
-  firstTs: number;
-  lastTs: number;
-  promptCount: number;
-  filesTouched: Set<string>;
-}
-
-/**
- * C3: Safely read a JSONL session file.
- *   - lstat: refuse symlinks, hardlinks (nlink > 1), non-regular files
- *   - require current uid ownership
- *   - refuse files >MAX_JSONL_BYTES
- *   - open by fd, fstat, read by fd (no path reopen → no TOCTOU)
- *   - cap row count
- * Returns null when the file is rejected.
- */
-function safeReadJsonl(path: string): string | null {
-  let stat;
-  try {
-    stat = lstatSync(path);
-  } catch {
-    return null;
-  }
-  if (!stat.isFile()) return null;
-  if (stat.isSymbolicLink()) return null;
-  if (stat.nlink > 1) return null; // hardlink — could escape into other content
-  if (stat.uid !== userInfo().uid) return null;
-  if (stat.size > MAX_JSONL_BYTES) return null;
-
-  let fd: number;
-  try {
-    fd = openSync(path, 'r');
-  } catch {
-    return null;
-  }
-  try {
-    // Verify the open file matches the stat result (catches TOCTOU swaps).
-    const fstat = fstatSync(fd);
-    if (fstat.ino !== stat.ino || fstat.dev !== stat.dev) return null;
-    const buf = Buffer.alloc(fstat.size);
-    let offset = 0;
-    while (offset < fstat.size) {
-      const n = readSync(fd, buf, offset, fstat.size - offset, offset);
-      if (n <= 0) break;
-      offset += n;
-    }
-    return buf.toString('utf8', 0, offset);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function loadSessionsForRepo(repoRoot: string): SessionMeta[] {
-  const encoded = encodeCwd(repoRoot);
-  const dir = join(CLAUDE_PROJECTS, encoded);
-  if (!existsSync(dir)) return [];
-
-  // Refuse if the directory itself is a symlink.
-  let dirStat;
-  try {
-    dirStat = lstatSync(dir);
-  } catch {
-    return [];
-  }
-  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return [];
-  if (dirStat.uid !== userInfo().uid) return [];
-
-  const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-  const out: SessionMeta[] = [];
-  for (const f of files) {
-    const fp = join(dir, f);
-    const meta = inspectSession(fp);
-    if (meta && meta.promptCount > 0) out.push(meta);
-  }
-  return out;
-}
-
-function inspectSession(path: string): SessionMeta | null {
-  const content = safeReadJsonl(path);
-  if (content === null) return null;
-  let firstTs = Number.POSITIVE_INFINITY;
-  let lastTs = 0;
-  let promptCount = 0;
-  let rowCount = 0;
-  const filesTouched = new Set<string>();
-  for (const line of content.split('\n')) {
-    if (++rowCount > MAX_JSONL_ROWS) break;
-    if (!line.trim()) continue;
-    let row: {
-      type?: string;
-      timestamp?: string;
-      message?: { content?: unknown };
-      toolUseResult?: unknown;
-    };
-    try {
-      row = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (row.timestamp) {
-      const t = Date.parse(row.timestamp);
-      if (!Number.isNaN(t)) {
-        if (t < firstTs) firstTs = t;
-        if (t > lastTs) lastTs = t;
-      }
-    }
-    if (row.type === 'user' && isRealPrompt(row.message?.content)) promptCount++;
-    // Extract file paths from tool-use blocks (Edit, Write, Read, etc.).
-    extractFilePaths(row, filesTouched);
-  }
-  return { path, firstTs, lastTs, promptCount, filesTouched };
-}
-
-function extractFilePaths(row: unknown, out: Set<string>): void {
-  if (!row || typeof row !== 'object') return;
-  // Walk the row recursively; collect any value at key "file_path".
-  const stack: unknown[] = [row];
-  while (stack.length > 0) {
-    const v = stack.pop();
-    if (!v || typeof v !== 'object') continue;
-    if (Array.isArray(v)) {
-      for (const item of v) stack.push(item);
-      continue;
-    }
-    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
-      if (k === 'file_path' && typeof val === 'string' && val.length > 0) {
-        out.add(val);
-      } else if (val && typeof val === 'object') {
-        stack.push(val);
-      }
-    }
-  }
-}
-
-function isRealPrompt(content: unknown): boolean {
-  if (typeof content === 'string') {
-    if (content.includes('<command-name>')) return false;
-    if (content.includes('<local-command-caveat>')) return false;
-    if (content.trim().length === 0) return false;
-    return true;
-  }
-  if (Array.isArray(content)) {
-    return content.some((block) => block && typeof block === 'object' && (block as { type?: string }).type === 'text');
-  }
-  return false;
-}
-
-function overlapsRange(s: SessionMeta, range: { min: number; max: number }, graceMin: number): boolean {
-  const grace = graceMin * 60 * 1000;
-  return s.lastTs >= range.min - grace && s.firstTs <= range.max + grace;
-}
-
-function intersectsDiffFiles(s: SessionMeta, diffFiles: Set<string>): boolean {
-  if (diffFiles.size === 0) return false;
-  // Match by realpath suffix: session paths are usually absolute but diff files
-  // are relative. Treat as overlap if any session-touched path ends with any
-  // diff-file path.
-  for (const f of diffFiles) {
-    for (const touched of s.filesTouched) {
-      if (touched.endsWith(`/${f}`) || touched === f) return true;
-    }
-  }
-  return false;
-}
-
-function filterScope(
-  s: SessionMeta,
-  range: { min: number; max: number },
-  diffFiles: Set<string>,
-  args: { scope: 'time' | 'file' | 'both'; graceMin: number },
-): boolean {
-  const timeMatch = overlapsRange(s, range, args.graceMin);
-  switch (args.scope) {
-    case 'time': return timeMatch;
-    case 'file': return intersectsDiffFiles(s, diffFiles);
-    case 'both': return timeMatch && intersectsDiffFiles(s, diffFiles);
-  }
-}
-
-function applyScrubbers(s: string, rules: ScrubRule[]): string {
-  let out = s;
-  for (const r of rules) {
-    out = out.replaceAll(r.pattern, r.replacement);
-  }
-  return out;
-}
-
-function extractTextFromContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const block of content) {
-      if (block && typeof block === 'object') {
-        const b = block as { type?: string; text?: string };
-        if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text);
-      }
-    }
-    return parts.join('\n');
-  }
-  return '';
-}
-
-function neutralizeUntrustedText(s: string): string {
-  // Render transcript content so embedded markdown/HTML cannot influence
-  // the gist body or smuggle clickable links to reviewers.
-  return s
-    .replaceAll(/!\[([^\]]*)\]\(([^)]*)\)/g, '[image: $2]')
-    .replaceAll(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
-    .replaceAll(/<\/?[a-zA-Z][^>]*>/g, '');
-}
-
-interface CollectOptions {
-  includeCode: boolean;
-  scrubbers: ScrubRule[];
-}
-
-function collectMarkdown(repoRoot: string, prNum: number, baseRef: string, sessions: SessionMeta[], opts: CollectOptions): string {
-  const lines: string[] = [];
-  lines.push(`# AI Provenance for PR #${prNum}`);
-  lines.push('');
-  lines.push(`Captured: ${new Date().toISOString()}`);
-  lines.push(`Repo: ${applyScrubbers(repoRoot, opts.scrubbers)}`);
-  lines.push(`Base ref: ${baseRef}`);
-  lines.push(`Sessions: ${sessions.length}`);
-  const totalPrompts = sessions.reduce((s, x) => s + x.promptCount, 0);
-  lines.push(`Total prompts: ${totalPrompts}`);
-  lines.push('');
-  lines.push('---');
-  lines.push('');
-
-  for (let i = 0; i < sessions.length; i++) {
-    const s = sessions[i]!;
-    lines.push(`## Session ${i + 1}`);
-    lines.push('');
-    lines.push(`- First message: ${new Date(s.firstTs).toISOString()}`);
-    lines.push(`- Last message:  ${new Date(s.lastTs).toISOString()}`);
-    lines.push(`- Prompts: ${s.promptCount}`);
-    lines.push('');
-    lines.push('### Prompts');
-    lines.push('');
-    let n = 0;
-    const sessionContent = safeReadJsonl(s.path);
-    if (sessionContent === null) continue;
-    let rowCount = 0;
-    for (const line of sessionContent.split('\n')) {
-      if (++rowCount > MAX_JSONL_ROWS) break;
-      if (!line.trim()) continue;
-      let row: { type?: string; timestamp?: string; message?: { content?: unknown } };
-      try {
-        row = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (row.type !== 'user') continue;
-      if (!isRealPrompt(row.message?.content)) continue;
-      n++;
-      const ts = row.timestamp ? new Date(row.timestamp).toISOString().slice(11, 19) : '';
-      let text = extractTextFromContent(row.message?.content).trim();
-      if (!opts.includeCode) {
-        // Strip fenced code blocks to keep gists scannable.
-        text = text.replaceAll(/```[\s\S]*?```/g, '[code block stripped]');
-      }
-      text = applyScrubbers(text, opts.scrubbers);
-      // C2: render transcript content as untrusted data.
-      //   - Markdown links/images → plain URL text only (no clickable smuggling).
-      //   - Wrap each prompt in a fenced code block so markdown/HTML inside
-      //     cannot influence the gist's structure.
-      text = neutralizeUntrustedText(text);
-      lines.push(`**Prompt ${n}** (${ts}):`);
-      lines.push('');
-      lines.push('```text');
-      // Sanitize the fence too: if text contains backticks-3+, escape them.
-      lines.push(text.replaceAll(/```/g, '` ` `'));
-      lines.push('```');
-      lines.push('');
-    }
-  }
-
-  return lines.join('\n');
-}
-
-function loadScrubbers(): ScrubRule[] {
-  // Default scrubbers always apply. Merge user-supplied rules from
-  // ~/.config/provenance/config.json (JSON, not YAML, to avoid a YAML dep).
-  //
-  // Expected shape:
-  // {
-  //   "scrubbers": [
-  //     { "id": "my-pattern", "pattern": "regex", "replacement": "[REDACTED]",
-  //       "flags": "gi" }
-  //   ]
-  // }
-  const configJson = join(homedir(), '.config', 'provenance', 'config.json');
-  if (!existsSync(configJson)) return DEFAULT_SCRUBBERS;
-
-  const userRules: ScrubRule[] = [];
-  try {
-    const raw = readFileSync(configJson, 'utf8');
-    const parsed = JSON.parse(raw) as {
-      scrubbers?: Array<{ id?: string; pattern?: string; replacement?: string; flags?: string }>;
-    };
-    if (Array.isArray(parsed.scrubbers)) {
-      for (const r of parsed.scrubbers) {
-        if (!r.id || !r.pattern || r.replacement === undefined) continue;
-        try {
-          userRules.push({
-            id: r.id,
-            pattern: new RegExp(r.pattern, r.flags ?? 'g'),
-            replacement: r.replacement,
-          });
-        } catch (e) {
-          console.error(`provenance: bad scrubber regex '${r.id}': ${(e as Error).message}`);
-        }
-      }
-    }
-  } catch (e) {
-    console.error(`provenance: could not load ${configJson}: ${(e as Error).message}`);
-  }
-
-  return [...DEFAULT_SCRUBBERS, ...userRules];
-}
-
 function gitleaksCheck(content: string): { ok: boolean; report: string } {
   // Write content to a tmp file and run `gitleaks detect --source <file>`.
   const tmpDir = mkdirSync(join(tmpdir(), 'provenance-' + Date.now()), { recursive: true })!;
@@ -616,9 +253,9 @@ function cmdCollect(args: Args) {
   const repoRoot = detectRepoRoot(args.root);
   const pr = detectPr(args);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
-  const all = loadSessionsForRepo(repoRoot);
+  const all = loadRepoSessions(repoRoot, CLAUDE_PROJECTS);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = all.filter((s) => filterScope(s, range, diffFiles, args));
+  const overlapping = selectSessionsForRange(all, pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
     includeCode: args.includeCode,
     scrubbers: loadScrubbers(),
@@ -631,9 +268,9 @@ function cmdSessionsSince(args: Args) {
   if (!ref) die('usage: provenance sessions-since <ref>', 2);
   const repoRoot = detectRepoRoot(args.root);
   const range = getCommitTimestampsForRange(ref, repoRoot);
-  const all = loadSessionsForRepo(repoRoot);
+  const all = loadRepoSessions(repoRoot, CLAUDE_PROJECTS);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(ref, repoRoot) : new Set<string>();
-  const overlapping = all.filter((s) => filterScope(s, range, diffFiles, args));
+  const overlapping = selectSessionsForRange(all, ref, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   if (overlapping.length === 0) {
     console.log(`No overlapping sessions for commits in ${ref}..HEAD (${range.count} commits).`);
     return;
@@ -647,19 +284,22 @@ function cmdGistCreate(args: Args) {
   const repoRoot = detectRepoRoot(args.root);
   const pr = detectPr(args);
 
-  // C1: refuse to attach against public repos by default. Secret gists are
-  // URL-protected only; the URL goes in the PR body which is publicly readable
-  // for public repos, so attaching = effectively publishing the transcript.
-  if (pr.visibility === 'PUBLIC' && !args.publicOk) {
-    die(
-      `repo ${pr.nameWithOwner} is PUBLIC. A secret gist URL in a public PR body is effectively public.\n` +
-        `  - Use --dry-run to print the markdown locally without uploading.\n` +
-        `  - Use --no-attach to create a secret gist but NOT link it from the PR.\n` +
-        `  - Use --public-ok to override after reviewing dry-run output.`,
-      4,
-    );
-  }
-  if (pr.visibility === 'UNKNOWN' && !args.publicOk) {
+  const visibilityPlan = buildPostingPlan({
+    visibility: pr.visibility,
+    flags: { publicOk: args.publicOk, noAttach: args.noAttach, dryRun: args.dryRun, force: args.force },
+    gitleaksResult: { ok: true },
+    action: 'gist-create',
+  });
+  if (!visibilityPlan.allow) {
+    if (pr.visibility === 'PUBLIC') {
+      die(
+        `repo ${pr.nameWithOwner} is PUBLIC. A secret gist URL in a public PR body is effectively public.\n` +
+          `  - Use --dry-run to print the markdown locally without uploading.\n` +
+          `  - Use --no-attach to create a secret gist but NOT link it from the PR.\n` +
+          `  - Use --public-ok to override after reviewing dry-run output.`,
+        4,
+      );
+    }
     die(
       `repo visibility could not be determined for ${pr.nameWithOwner}.\n` +
         `Refusing to attach; rerun with --public-ok if you've reviewed dry-run output.`,
@@ -669,7 +309,7 @@ function cmdGistCreate(args: Args) {
 
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = loadSessionsForRepo(repoRoot).filter((s) => filterScope(s, range, diffFiles, args));
+  const overlapping = selectSessionsForRange(loadRepoSessions(repoRoot, CLAUDE_PROJECTS), pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
   if (overlapping.length === 0) {
     die(`no sessions overlap commits in origin/${pr.baseRef}..HEAD (PR #${pr.number})`);
   }
@@ -680,15 +320,20 @@ function cmdGistCreate(args: Args) {
 
   // Hard-block gitleaks: defeat-soft-confirm only behind --force.
   const leak = gitleaksCheck(md);
+  const postingPlan = buildPostingPlan({
+    visibility: pr.visibility,
+    flags: { publicOk: args.publicOk, noAttach: args.noAttach, dryRun: args.dryRun, force: args.force },
+    gitleaksResult: leak,
+    action: 'gist-create',
+  });
+  if (!postingPlan.allow) {
+    console.error(`provenance: gist content contains potential secrets — refusing to post.`);
+    console.error(`Use --force to override (NOT recommended for public repos).`);
+    console.error(leak.report);
+    process.exit(3);
+  }
   if (!leak.ok) {
-    if (!args.force) {
-      console.error(`provenance: gist content contains potential secrets — refusing to post.`);
-      console.error(`Use --force to override (NOT recommended for public repos).`);
-      console.error(leak.report);
-      process.exit(3);
-    } else {
-      console.error(`provenance: WARNING: gitleaks reported issues; posting anyway because --force.`);
-    }
+    console.error(`provenance: WARNING: gitleaks reported issues; posting anyway because --force.`);
   }
 
   if (args.dryRun) {
@@ -786,17 +431,10 @@ function cmdHandoff(args: Args) {
 
   const lastN = args.lastPrompts ?? 10;
   const repoRoot = detectRepoRoot(args.root);
-  const sessions = loadSessionsForRepo(repoRoot);
+  const sessions = loadRepoSessions(repoRoot, CLAUDE_PROJECTS);
 
-  let session: SessionMeta | undefined;
-  if (args.session) {
-    session = sessions.find((s) => s.path.endsWith(`${args.session}.jsonl`));
-    if (!session) die(`session not found: ${args.session}`);
-  } else {
-    // Pick the session with the most recent `lastTs`.
-    session = sessions.sort((a, b) => b.lastTs - a.lastTs)[0];
-    if (!session) die('no Claude Code sessions found for this repo');
-  }
+  const session = selectHandoffSession(sessions, args.session);
+  if (!session) die(args.session ? `session not found: ${args.session}` : 'no Claude Code sessions found for this repo');
 
   const branch = git(['symbolic-ref', '--short', 'HEAD'], repoRoot).stdout.trim() || '(detached)';
   const repoName = repoRoot.split('/').pop()!;
@@ -849,10 +487,7 @@ function cmdHandoff(args: Args) {
   for (let i = 0; i < recent.length; i++) {
     const p = recent[i]!;
     const ts = p.ts ? new Date(p.ts).toISOString().slice(11, 19) : '';
-    let text = applyScrubbers(p.text, scrubbers);
-    text = neutralizeUntrustedText(text);
-    // Keep prompts terse: collapse internal newlines.
-    text = text.replaceAll(/\s+/g, ' ').slice(0, 300);
+    const text = sanitize(p.text, 'handoff-inline', { scrubbers, maxLength: 300 });
     lines.push(`${i + 1}. **${ts}** — ${text}`);
   }
   lines.push('');
@@ -864,7 +499,7 @@ function cmdHandoff(args: Args) {
     lines.push('');
     const truncated = files.length > 30 ? files.slice(0, 30) : files;
     for (const f of truncated) {
-      lines.push(`- \`${applyScrubbers(f, scrubbers)}\``);
+      lines.push(`- \`${sanitize(f, 'handoff-inline', { scrubbers, maxLength: 1000 })}\``);
     }
     if (files.length > 30) {
       lines.push(`- … and ${files.length - 30} more`);
@@ -927,4 +562,6 @@ function main() {
   }
 }
 
-main();
+if (import.meta.main) {
+  await main();
+}

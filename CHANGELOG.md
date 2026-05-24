@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0] — pure core extraction
+
+### Added
+- Extracted session loading/selection, normalized file scoping, sanitization, and posting-policy decisions into `src/core/`.
+- Added direct core tests for dotted Claude Code path encoding, repo-relative scope normalization, basename-collision prevention, sanitization modes, unsafe JSONL rejection, and posting-plan policy branches.
+
+### Changed
+- `cli.ts` is now a thinner executable wrapper guarded by `import.meta.main`.
+- `provenance --help` reports `0.4.0`.
+
 ## [0.3.0] — handoff subcommand + encodeCwd bug fix
 
 ### Added
