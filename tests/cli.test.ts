@@ -35,7 +35,7 @@ describe('CLI basics', () => {
   test('--help prints usage', () => {
     const r = runCli('--help');
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('agents-trace 0.10.0');
+    expect(r.stdout).toContain('agents-trace 0.11.0');
     expect(r.stdout).toContain('subcommands:');
   });
 
@@ -129,15 +129,27 @@ describe('collect end-to-end with synthetic session', () => {
     expect(m).not.toBeNull();
     expect(Number.parseInt(m![1]!, 10)).toBe(2); // refactor + email-line; slash filtered.
   });
-  test('default scope (both) requires file-overlap; session with no file_path → no match', () => {
+  test('default scope (both) auto-falls back to time when zero sessions match file-overlap', () => {
     const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--root', repo], {
       encoding: 'utf8',
       env: { ...process.env, HOME: fakeHome },
     });
     expect(r.status).toBe(0);
-    // The fixture session has prompts but no `file_path` references, so under
-    // 'both' scope (time AND file overlap) there's no match.
+    // The fixture session has prompts but no `file_path` references. Under the
+    // new auto-fallback (v0.11.0): both \u2192 time when both returns 0. The session
+    // is now visible, and a stderr warning announces the fallback.
+    expect(r.stdout).toContain('prompts=');
+    expect(r.stderr).toContain('falling back to scope=time');
+  });
+
+  test('explicit --scope file is honored verbatim without fallback', () => {
+    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--root', repo, '--scope', 'file'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: fakeHome },
+    });
+    expect(r.status).toBe(0);
     expect(r.stdout).toContain('No overlapping sessions');
+    expect(r.stderr).not.toContain('falling back');
   });
 });
 
@@ -283,6 +295,150 @@ describe('OMP session adapter', () => {
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('prompts=2');
+  });
+});
+
+describe('Multi-root session loading (worktree + canonical)', () => {
+  let fakeHome: string;
+  let canonical: string;
+  let worktree: string;
+  let origHome: string;
+
+  beforeEach(() => {
+    origHome = process.env.HOME!;
+    fakeHome = mkdtempSync(join(tmpdir(), 'mroot-home-'));
+    process.env.HOME = fakeHome;
+    canonical = join(fakeHome, 'canonical');
+    mkdirSync(canonical, { recursive: true });
+
+    // Init canonical repo with an initial commit so worktree-add can branch off it.
+    spawnSync('git', ['-C', canonical, 'init', '-q', '-b', 'main'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', canonical, 'config', 'user.email', 't@local'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', canonical, 'config', 'user.name', 't'], { encoding: 'utf8' });
+    writeFileSync(join(canonical, 'a'), 'a\n');
+    spawnSync('git', ['-C', canonical, 'add', 'a'], { encoding: 'utf8' });
+    spawnSync('git', ['-C', canonical, 'commit', '-q', '-m', 'init'], { encoding: 'utf8' });
+
+    worktree = join(fakeHome, 'wt');
+    spawnSync('git', ['-C', canonical, 'worktree', 'add', '-b', 'feat', worktree], { encoding: 'utf8' });
+
+    // OMP session recorded against CANONICAL cwd (the user did the work in canonical).
+    const canonicalEnc = '-canonical';
+    const sessionsDir = join(fakeHome, '.omp', 'agent', 'sessions', canonicalEnc);
+    mkdirSync(sessionsDir, { recursive: true });
+    const now = Date.now();
+    const rows = [
+      { type: 'session', version: 3, id: 's-canonical', timestamp: new Date(now - 1000).toISOString(), cwd: canonical, title: 't' },
+      { type: 'message', id: 'p1', timestamp: new Date(now - 800).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'work done in canonical' }] } },
+    ];
+    writeFileSync(join(sessionsDir, '2026-05-27T00-00-00-000Z_s-canonical.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n'));
+  });
+
+  afterEach(() => {
+    process.env.HOME = origHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test('sessions-since run from the worktree picks up sessions recorded against canonical', () => {
+    const r = spawnSync('bun', [CLI, 'sessions-since', 'main', '--source', 'omp', '--root', worktree, '--scope', 'time'], {
+      encoding: 'utf8',
+      env: { ...process.env, HOME: fakeHome },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('prompts=1');
+    expect(r.stdout).toContain('s-canonical');
+  });
+});
+
+describe('Plan-response capture', () => {
+  test('collectMarkdown captures /plan response from Claude session shape', async () => {
+    const { collectMarkdown } = await import('../src/core/sanitize.ts');
+    const fakeHome = mkdtempSync(join(tmpdir(), 'plan-home-'));
+    const repo = join(fakeHome, 'repo');
+    mkdirSync(repo, { recursive: true });
+
+    const sessionPath = join(fakeHome, 'session.jsonl');
+    const now = Date.now();
+    const rows = [
+      { type: 'user', timestamp: new Date(now - 5000).toISOString(), message: { content: 'normal prompt one' } },
+      { type: 'user', timestamp: new Date(now - 4000).toISOString(), message: { content: '<command-name>/plan</command-name>\n<command-message>plan</command-message>\n<command-args></command-args>' } },
+      { type: 'assistant', timestamp: new Date(now - 3500).toISOString(), message: { content: [{ type: 'text', text: 'Here is the plan:\n1. Step A\n2. Step B' }] } },
+      { type: 'assistant', timestamp: new Date(now - 3000).toISOString(), message: { content: [{ type: 'text', text: 'Step C continues' }] } },
+      { type: 'user', timestamp: new Date(now - 2000).toISOString(), message: { content: 'normal prompt two' } },
+    ];
+    writeFileSync(sessionPath, rows.map((r) => JSON.stringify(r)).join('\n'));
+
+    const session: SessionMeta = {
+      path: sessionPath,
+      firstTs: now - 5000,
+      lastTs: now - 2000,
+      promptCount: 2,
+      filesTouched: new Set(),
+    };
+    const md = collectMarkdown(repo, 99, 'main', [session], { includeCode: false, scrubbers: [] });
+    expect(md).toContain('### Plans');
+    expect(md).toContain('Step A');
+    expect(md).toContain('Step B');
+    expect(md).toContain('Step C continues');
+    expect(md).toContain('normal prompt one');
+    expect(md).toContain('normal prompt two');
+    expect(md).not.toContain('<command-name>'); // raw command row filtered out of prompts
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test('collectMarkdown captures /plan response from OMP session shape', async () => {
+    const { collectMarkdown } = await import('../src/core/sanitize.ts');
+    const fakeHome = mkdtempSync(join(tmpdir(), 'plan-omp-home-'));
+    const repo = join(fakeHome, 'repo');
+    mkdirSync(repo, { recursive: true });
+
+    const sessionPath = join(fakeHome, 'session.jsonl');
+    const now = Date.now();
+    const rows = [
+      { type: 'message', timestamp: new Date(now - 5000).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'normal prompt one' }] } },
+      { type: 'message', timestamp: new Date(now - 4000).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: '<command-name>/plan</command-name>' }] } },
+      { type: 'message', timestamp: new Date(now - 3500).toISOString(), message: { role: 'assistant', content: [{ type: 'text', text: 'Plan body: do X then Y' }] } },
+      { type: 'message', timestamp: new Date(now - 2000).toISOString(), message: { role: 'user', attribution: 'user', content: [{ type: 'text', text: 'normal prompt two' }] } },
+    ];
+    writeFileSync(sessionPath, rows.map((r) => JSON.stringify(r)).join('\n'));
+
+    const session: SessionMeta = {
+      path: sessionPath,
+      firstTs: now - 5000,
+      lastTs: now - 2000,
+      promptCount: 2,
+      filesTouched: new Set(),
+    };
+    const md = collectMarkdown(repo, 100, 'main', [session], { includeCode: false, scrubbers: [] });
+    expect(md).toContain('### Plans');
+    expect(md).toContain('Plan body: do X then Y');
+    expect(md).toContain('normal prompt one');
+    expect(md).toContain('normal prompt two');
+    rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  test('sessions without /plan invocations do not emit a Plans section', async () => {
+    const { collectMarkdown } = await import('../src/core/sanitize.ts');
+    const fakeHome = mkdtempSync(join(tmpdir(), 'noplan-home-'));
+    const sessionPath = join(fakeHome, 'session.jsonl');
+    const now = Date.now();
+    const rows = [
+      { type: 'user', timestamp: new Date(now - 5000).toISOString(), message: { content: 'just a normal prompt' } },
+      { type: 'assistant', timestamp: new Date(now - 4500).toISOString(), message: { content: [{ type: 'text', text: 'just a normal reply' }] } },
+    ];
+    writeFileSync(sessionPath, rows.map((r) => JSON.stringify(r)).join('\n'));
+
+    const session: SessionMeta = {
+      path: sessionPath,
+      firstTs: now - 5000,
+      lastTs: now - 4500,
+      promptCount: 1,
+      filesTouched: new Set(),
+    };
+    const md = collectMarkdown(fakeHome, 101, 'main', [session], { includeCode: false, scrubbers: [] });
+    expect(md).not.toContain('### Plans');
+    expect(md).toContain('### Prompts');
+    rmSync(fakeHome, { recursive: true, force: true });
   });
 });
 

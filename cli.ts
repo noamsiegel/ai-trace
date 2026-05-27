@@ -30,12 +30,12 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { buildPostingPlan, normalizeRepoVisibility } from './src/core/posting-plan.ts';
-import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isPromptRow, extractPromptText, type SessionSource } from './src/core/session.ts';
+import { loadRepoSessions, selectHandoffSession, selectSessionsForRange, safeReadJsonl, isPromptRow, extractPromptText, type SessionSource, type SessionMeta, type CommitRange } from './src/core/session.ts';
 import { collectMarkdown, loadScrubbers, sanitize, type ScrubRule } from './src/core/sanitize.ts';
 import { GhClient, type PrContext } from './src/adapters/gh-client.ts';
 import { GitleaksRunner } from './src/adapters/gitleaks.ts';
 
-const VERSION = '0.10.0';
+const VERSION = '0.11.0';
 
 export interface Args {
   pr?: string;
@@ -193,6 +193,36 @@ function detectRepoRoot(override?: string): string {
   return r.stdout.trim();
 }
 
+// Resolve all worktree roots that share a git repo with the given root. When
+// `repoRoot` is a worktree, sessions for the canonical checkout (or sibling
+// worktrees) live under different `<encoded-cwd>` directories but belong to
+// the same logical repo \u2014 a PR opened from one worktree often wants traces
+// from sessions that ran in the canonical.
+function resolveAllRoots(repoRoot: string): string[] {
+  const roots = new Set<string>([resolve(repoRoot)]);
+  const r = git(['worktree', 'list', '--porcelain'], repoRoot);
+  if (r.status !== 0) return [...roots];
+  for (const block of r.stdout.split('\n\n')) {
+    const m = block.match(/^worktree\s+(\S+)/m);
+    if (m) roots.add(resolve(m[1]!));
+  }
+  return [...roots];
+}
+
+// Load sessions across all worktree roots, deduplicating by session file path.
+function loadAllRootSessions(roots: string[], source: SessionSource): SessionMeta[] {
+  const seen = new Set<string>();
+  const out: SessionMeta[] = [];
+  for (const r of roots) {
+    for (const s of loadRepoSessions(r, source)) {
+      if (seen.has(s.path)) continue;
+      seen.add(s.path);
+      out.push(s);
+    }
+  }
+  return out;
+}
+
 async function detectPr(args: Args, repoRoot: string, client = new GhClient()): Promise<PrContext> {
   try {
     const pr = await client.readPrContext(repoRoot, args.pr);
@@ -220,14 +250,37 @@ function getDiffFilesForRange(base: string, repoRoot: string): Set<string> {
   return new Set(r.stdout.split('\n').filter(Boolean));
 }
 
+// Select overlapping sessions with auto-fallback: when `scope=both` returns zero
+// (e.g. a fresh PR with only a marker file has no file-overlap with any prior
+// session), retry with `scope=time` and emit a stderr warning. Explicit
+// `--scope time` and `--scope file` are honored verbatim with no fallback.
+function selectWithScopeFallback(
+  all: SessionMeta[],
+  baseRef: string,
+  repoRoot: string,
+  range: CommitRange,
+  diffFiles: Set<string>,
+  graceMin: number,
+  scope: 'time' | 'file' | 'both',
+): SessionMeta[] {
+  const primary = selectSessionsForRange(all, baseRef, { mode: scope, repoRoot, commitRange: range, diffFiles }, graceMin);
+  if (primary.length > 0) return primary;
+  if (scope !== 'both') return primary;
+  const fallback = selectSessionsForRange(all, baseRef, { mode: 'time', repoRoot, commitRange: range, diffFiles }, graceMin);
+  if (fallback.length > 0) {
+    process.stderr.write(`agents-trace: scope=both returned 0 sessions; falling back to scope=time (${fallback.length} match)\n`);
+  }
+  return fallback;
+}
+
 
 async function cmdCollect(args: Args, scrubbers: ScrubRule[] = loadScrubbers()) {
   const repoRoot = detectRepoRoot(args.root);
   const pr = await detectPr(args, repoRoot);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
-  const all = loadRepoSessions(repoRoot, args.source);
+  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = selectSessionsForRange(all, pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
+  const overlapping = selectWithScopeFallback(all, pr.baseRef, repoRoot, range, diffFiles, args.graceMin, args.scope);
   const md = collectMarkdown(repoRoot, pr.number, pr.baseRef, overlapping, {
     includeCode: args.includeCode,
     scrubbers,
@@ -240,9 +293,9 @@ function cmdSessionsSince(args: Args) {
   if (!ref) die('usage: agents-trace sessions-since <ref>', 2);
   const repoRoot = detectRepoRoot(args.root);
   const range = getCommitTimestampsForRange(ref, repoRoot);
-  const all = loadRepoSessions(repoRoot, args.source);
+  const all = loadAllRootSessions(resolveAllRoots(repoRoot), args.source);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(ref, repoRoot) : new Set<string>();
-  const overlapping = selectSessionsForRange(all, ref, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
+  const overlapping = selectWithScopeFallback(all, ref, repoRoot, range, diffFiles, args.graceMin, args.scope);
   if (overlapping.length === 0) {
     console.log(`No overlapping sessions for commits in ${ref}..HEAD (${range.count} commits).`);
     return;
@@ -266,7 +319,7 @@ export async function cmdGistCreate(
   const pr = await detectPr(args, repoRoot, client);
   const range = getCommitTimestampsForRange(`origin/${pr.baseRef}`, repoRoot);
   const diffFiles = args.scope !== 'time' ? getDiffFilesForRange(`origin/${pr.baseRef}`, repoRoot) : new Set<string>();
-  const overlapping = selectSessionsForRange(loadRepoSessions(repoRoot, args.source), pr.baseRef, { mode: args.scope, repoRoot, commitRange: range, diffFiles }, args.graceMin);
+  const overlapping = selectWithScopeFallback(loadAllRootSessions(resolveAllRoots(repoRoot), args.source), pr.baseRef, repoRoot, range, diffFiles, args.graceMin, args.scope);
   if (overlapping.length === 0) {
     die(`no sessions overlap commits in origin/${pr.baseRef}..HEAD (PR #${pr.number})`);
   }
