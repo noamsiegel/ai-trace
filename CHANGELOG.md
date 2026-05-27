@@ -1,6 +1,17 @@
 # Changelog
 ## [Unreleased]
 
+## [0.11.0] \u2014 scope auto-fallback + multi-root sessions + /plan capture
+
+### Added
+- `--scope` auto-fallback: when default `--scope both` returns 0 sessions, automatically retry with `--scope time` and emit a stderr warning. Explicit `--scope time|file` is honored without fallback. Fixes the "fresh PR with only a marker file shows no sessions" case.
+- Multi-root session loading: when run from a git worktree, `agents-trace` now also looks for sessions recorded against sibling worktrees (including canonical). Uses `git worktree list --porcelain` to discover all roots; dedupes session files. Removes the need for `--root <canonical>` when PRs are opened from a worktree but AI sessions ran in canonical.
+- `/plan` response capture in rendered markdown: when a session contains a `<command-name>/plan</command-name>` row, subsequent assistant messages (until the next user prompt) are collected into a `### Plans` section in the gist. Works for both Claude Code (`type: "user"` / `type: "assistant"`) and OMP (`type: "message"` + `message.role`).
+- New exports: `extractAssistantText`, `isPlanCommandRow`, `isAnyUserRow`, `pathsEquivalent` in `src/core/session.ts`.
+
+### Fixed
+- Path-equivalence: session.cwd vs repoRoot comparison now uses realpath on macOS, fixing `/var/folders/\u2026` vs `/private/var/folders/\u2026` symlink-mediated mismatches (and analogous worktree-vs-canonical mismatches).
+
 ## [0.10.0] \u2014 OMP source support + gh gist fix
 
 ### Added

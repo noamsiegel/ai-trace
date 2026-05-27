@@ -1,4 +1,4 @@
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir, userInfo } from 'node:os';
 import { normalizeToRepoRelative, intersectsScope } from './scope.ts';
@@ -31,6 +31,17 @@ export interface RangeSelectionScope {
 
 export function encodeCwd(p: string): string {
   return p.replaceAll('/', '-').replaceAll('.', '-');
+}
+
+// Compare two filesystem paths through realpath so symlink-mediated mismatches
+// (e.g. macOS /var/folders/\u2026 vs /private/var/folders/\u2026, or worktrees vs canonical)
+// don't cause false negatives when matching session.cwd to repoRoot.
+export function pathsEquivalent(a: string, b: string): boolean {
+  if (resolve(a) === resolve(b)) return true;
+  let ra: string, rb: string;
+  try { ra = realpathSync(a); } catch { ra = resolve(a); }
+  try { rb = realpathSync(b); } catch { rb = resolve(b); }
+  return ra === rb;
 }
 
 export type SessionSource = 'claude' | 'codex' | 'omp' | 'auto';
@@ -144,7 +155,7 @@ export function inspectCodexSession(path: string, repoRoot: string): SessionMeta
 
   // Codex stores sessions in a global tree rather than a cwd-encoded directory.
   // Scan every session file and keep only transcripts whose recorded cwd is the target repo.
-  if (cwd !== resolve(repoRoot)) return null;
+  if (cwd === null || !pathsEquivalent(cwd, repoRoot)) return null;
   return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
 }
 
@@ -191,7 +202,7 @@ export function inspectOmpSession(path: string, repoRoot: string): SessionMeta |
     extractFilePaths(row, filesTouched);
   }
 
-  if (cwd === null || cwd !== resolve(repoRoot)) return null;
+  if (cwd === null || !pathsEquivalent(cwd, repoRoot)) return null;
   return finiteSession(path, firstTs, lastTs, promptCount, filesTouched);
 }
 
@@ -334,6 +345,60 @@ export function extractTextFromContent(content: unknown): string {
     return parts.join('\n');
   }
   return '';
+}
+
+// Extract assistant-side message text. Mirrors extractPromptText but for role=assistant.
+// Returns empty string for non-assistant rows or when no text content is found.
+export function extractAssistantText(row: unknown): string {
+  if (!row || typeof row !== 'object') return '';
+  const r = row as { type?: string; message?: { role?: string; content?: unknown }; payload?: unknown };
+
+  // Claude shape: { type: "assistant", message: { content: [...] } }
+  if (r.type === 'assistant') return extractTextFromContent(r.message?.content);
+
+  // OMP shape: { type: "message", message: { role: "assistant", content: [...] } }
+  if (r.type === 'message' && r.message && typeof r.message === 'object') {
+    const msg = r.message as { role?: string; content?: unknown };
+    if (msg.role === 'assistant') return extractTextFromContent(msg.content);
+  }
+
+  // Codex shape: { type: "response_item", payload: { type: "message", role: "assistant", content: [...] } }
+  const payload = r.payload && typeof r.payload === 'object' ? r.payload as { type?: string; role?: string; content?: unknown } : null;
+  if (payload && r.type === 'response_item' && payload.type === 'message' && payload.role === 'assistant') {
+    return extractTextFromContent(payload.content);
+  }
+  return '';
+}
+
+// Detect whether a user-prompt row is a `/plan` slash-command invocation.
+// Pattern: <command-name>/plan</command-name> or <command-name>plan</command-name>.
+export function isPlanCommandRow(row: unknown): boolean {
+  const r = row as { type?: string; message?: { content?: unknown } };
+  // Pull the raw text without going through the isPromptRow filter (which strips command rows).
+  const text = extractPromptTextRaw(r);
+  return /<command-name>\/?plan<\/command-name>/i.test(text);
+}
+
+// Same as extractPromptText but skips the isRealPrompt filter, so command rows are visible.
+function extractPromptTextRaw(row: unknown): string {
+  if (!row || typeof row !== 'object') return '';
+  const r = row as { type?: string; message?: { content?: unknown }; payload?: unknown };
+  if (r.type === 'user') return extractTextFromContent(r.message?.content);
+  if (r.type === 'message' && r.message && typeof r.message === 'object') {
+    const msg = r.message as { role?: string; content?: unknown; attribution?: string };
+    if (msg.role === 'user') return extractTextFromContent(msg.content);
+  }
+  const payload = r.payload && typeof r.payload === 'object' ? r.payload as { type?: string; role?: string; message?: string; content?: unknown } : null;
+  if (payload) {
+    if (r.type === 'event_msg' && payload.type === 'user_message' && typeof payload.message === 'string') return payload.message;
+    if (r.type === 'response_item' && payload.type === 'message' && payload.role === 'user') return extractTextFromContent(payload.content);
+  }
+  return '';
+}
+
+// Detect any user row (filtered or not) \u2014 used to terminate plan-capture state.
+export function isAnyUserRow(row: unknown): boolean {
+  return extractPromptTextRaw(row).length > 0;
 }
 
 function finiteSession(path: string, firstTs: number, lastTs: number, promptCount: number, filesTouched: Set<string>): SessionMeta | null {

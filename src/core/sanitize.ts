@@ -1,4 +1,4 @@
-import { safeReadJsonl, isPromptRow, extractPromptText, type SessionMeta } from './session.ts';
+import { safeReadJsonl, isPromptRow, extractPromptText, extractAssistantText, isPlanCommandRow, isAnyUserRow, type SessionMeta } from './session.ts';
 import { type Scrubber, loadScrubbers } from './scrubbers.ts';
 
 export type ScrubRule = Scrubber;
@@ -51,11 +51,16 @@ export function collectMarkdown(repoRoot: string, prNum: number, baseRef: string
     lines.push(`- Last message:  ${new Date(s.lastTs).toISOString()}`);
     lines.push(`- Prompts: ${s.promptCount}`);
     lines.push('');
-    lines.push('### Prompts');
-    lines.push('');
-    let n = 0;
     const sessionContent = safeReadJsonl(s.path);
     if (sessionContent === null) continue;
+
+    // First pass: walk the rows once, collecting both prompts and plans.
+    // Plan-capture state: when a /plan command row appears, collect subsequent
+    // assistant rows until the next user row (any kind) is seen.
+    interface Plan { ts: string; text: string }
+    const prompts: { ts: string; text: string }[] = [];
+    const plans: Plan[] = [];
+    let planCollect: { ts: string; chunks: string[] } | null = null;
     let rowCount = 0;
     for (const line of sessionContent.split('\n')) {
       if (++rowCount > 50000) break;
@@ -66,19 +71,71 @@ export function collectMarkdown(repoRoot: string, prNum: number, baseRef: string
       } catch {
         continue;
       }
-      if (!isPromptRow(row)) continue;
-      n++;
       const ts = row.timestamp ? new Date(row.timestamp).toISOString().slice(11, 19) : '';
-      const text = sanitize(extractPromptText(row).trim(), 'audit-block', {
-        scrubbers: opts.scrubbers,
-        includeCode: opts.includeCode,
+
+      // Plan-mode termination: any user row (filtered or raw) ends the plan capture.
+      if (planCollect !== null && isAnyUserRow(row)) {
+        plans.push({ ts: planCollect.ts, text: planCollect.chunks.join('\n').trim() });
+        planCollect = null;
+      }
+
+      // Plan-mode entry: /plan invocation row.
+      if (isPlanCommandRow(row)) {
+        planCollect = { ts, chunks: [] };
+        continue; // do NOT also render as a prompt
+      }
+
+      // Plan-mode body: collect assistant text.
+      if (planCollect !== null) {
+        const txt = extractAssistantText(row).trim();
+        if (txt) planCollect.chunks.push(txt);
+        continue;
+      }
+
+      // Normal prompt path.
+      if (!isPromptRow(row)) continue;
+      prompts.push({
+        ts,
+        text: sanitize(extractPromptText(row).trim(), 'audit-block', {
+          scrubbers: opts.scrubbers,
+          includeCode: opts.includeCode,
+        }),
       });
-      lines.push(`**Prompt ${n}** (${ts}):`);
+    }
+    // Flush a plan still in progress at end-of-session.
+    if (planCollect !== null && planCollect.chunks.length > 0) {
+      plans.push({ ts: planCollect.ts, text: planCollect.chunks.join('\n').trim() });
+    }
+
+    lines.push('### Prompts');
+    lines.push('');
+    let n = 0;
+    for (const p of prompts) {
+      n++;
+      lines.push(`**Prompt ${n}** (${p.ts}):`);
       lines.push('');
       lines.push('```text');
-      lines.push(text);
+      lines.push(p.text);
       lines.push('```');
       lines.push('');
+    }
+
+    if (plans.length > 0) {
+      lines.push('### Plans');
+      lines.push('');
+      for (let pi = 0; pi < plans.length; pi++) {
+        const p = plans[pi]!;
+        const txt = sanitize(p.text, 'audit-block', {
+          scrubbers: opts.scrubbers,
+          includeCode: opts.includeCode,
+        });
+        lines.push(`**Plan ${pi + 1}** (${p.ts}):`);
+        lines.push('');
+        lines.push('```text');
+        lines.push(txt);
+        lines.push('```');
+        lines.push('');
+      }
     }
   }
 
